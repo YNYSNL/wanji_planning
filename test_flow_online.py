@@ -2,6 +2,7 @@
 import sys
 sys.path.append('/home/wanji/HIL/devel/lib/python3/dist-packages')
 import rospy
+import rosbag
 from common_msgs.msg import actuator
 from common_msgs.msg import hdmap
 from common_msgs.msg import hdroutetoglobal
@@ -19,10 +20,70 @@ import cvxpy
 from MotionPlanning.Control.MPC_XY_Frame import P, Node
 from transform import lon_lat_to_xy, xy_to_lon_lat
 import logging
+from planner import CACS_plan, bag_plan
 
 logging.basicConfig(filename='test_flow_online.log', level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 global pub_ego_plan
 global pub_ego_decision
+global bag_time
+bag_time = 0
+global bag_data
+file_path = '/home/wanji/tongji_vehicle/2025-01-18-17-30-22.bag'
+# 打开bag文件
+bag = rosbag.Bag(file_path, 'r')
+
+guidespeed = []
+guideangle = []
+timestamp = []
+roadpints = []
+# 遍历bag文件中的每条消息
+for topic, msg, t in bag.read_messages(topics='/planningmotion'):
+    # 读取 /planningmotion 话题中的数据
+    guidespeed.append(msg.guidespeed)   
+    guideangle.append(msg.guideangle)  
+    timestamp.append(msg.timestamp)
+    # 解析 /planningmotion 中的每个 roadpoint
+    planning_points = []
+    for point in msg.points:
+        p = roadpoint()
+        p.x = point.x
+        p.y = point.y
+        p.speed = point.speed
+        p.heading = point.heading
+        p.jerk = point.jerk
+        # p.lanewidth = point.lanewidth
+        p.s = point.s
+        # p.gx = point.gx
+        # p.gy = point.gy
+        # p.roadtype = point.roadtype
+        p.a = point.a
+        # p.lanetype = point.lanetype
+        # p.turnlight = point.turnlight
+        # p.mergelanetype = point.mergelanetype
+        # p.sensorlanetype = point.sensorlanetype
+        # p.curvature = point.curvature
+        # p.dkappa = point.dkappa
+        # p.ddkappa = point.ddkappa
+        # p.sideroadwidth = point.sideroadwidth
+        # p.leftlanewidth = point.leftlanewidth
+        # p.rightlanewidth = point.rightlanewidth
+        # p.laneswitch = point.laneswitch
+        # p.lanenum = point.lanenum
+        # p.lanesite = point.lanesite
+        planning_points.append(p)   
+    roadpints.append(planning_points)
+        
+    # 关闭bag文件
+bag.close()
+
+bag_data = {
+    "guidespeed": guidespeed, 
+    "guideangle": guideangle,   
+    "timestamp": timestamp,
+    "roadpoints": roadpints    
+}
+
+
 
 # 缓存每帧数据
 frame_data = {
@@ -70,100 +131,27 @@ def cal_action(data):
     ego_decision = decisionbehavior()
     ego_plan.points = roadpoint()
 
-    DataFromEgo = copy.deepcopy(data)
-    # print('DataFromEgo', DataFromEgo)
+    # ego_plan, ego_decision = CACS_plan(data)
 
-    # Get the current sensor data
-    sensorgps_data = frame_data.get("sensorgps")
+    global bag_data
+    global bag_time
 
-    v0 = sensorgps_data.velocity
-    heading = sensorgps_data.heading
-
-
-    ego_state = Node(
-        x=DataFromEgo['0'].get("x", 0.0), 
-        y=DataFromEgo['0'].get("y", 0.0), 
-        yaw=heading, 
-        v=DataFromEgo['0'].get("v", 0.0), 
-        direct=1.0
-    )
-    # Acceleration and time steps for the motion plan
-    a = 1  # Constant acceleration
-    t_max = 10  # Total time for the trajectory
-    time_steps = 50  # Number of time steps to break down the trajectory
-    dt = t_max / time_steps  # Time step for each update
-
-    # Generate the trajectory using the Node's kinematic update
-    trajectory_points = []
-    trajectory_points_x = []
-    trajectory_points_y = []
-    for t in range(time_steps):
-        # Update the vehicle's state using the Node's update method
-        # Create a roadpoint from the updated state
-        point = roadpoint()
-        point.x = ego_state.x  # Updated x-coordinate
-        point.y = ego_state.y  # Updated y-coordinate
-        point.gx = ego_state.x  # 经度
-        point.gy = ego_state.y  # 纬度
-
-        point.speed = ego_state.v  # Updated velocity
-        point.heading = heading  # Updated heading
-        point.a = a
-        point.jerk = 0  # Assuming no jerk (smooth motion)
-        point.lanewidth = 3.5  # Default lane width, adjust if needed
-        point.s = ego_state.x  # s position along the trajectory (simplified)
-        ego_state.update(a, delta=0.0, direct=1.0)  # Assume no steering (delta=0) for simplicity
-        # xy_converter = xy_to_lon_lat([ego_state], [state_dict])te(100)
-        # transformed_data = xy_converter.transform()
-
-        # 获取转换后的经纬度
-        # lat, lon = transformed_data[0]["lat"], transformed_data[0]["lon"]
-
-        # 将经纬度赋值给roadpoint
-
-        trajectory_points_x.append(point.x)
-        trajectory_points_y.append(point.y)
-
-        trajectory_points.append(point)
-
-    logging.info(f"trajectory_points_x: {trajectory_points_x}")
+    ego_plan, ego_decision = bag_plan(bag_data, bag_time, ego_plan, ego_decision)
+    bag_time += 1
 
 
-    # # Plot the trajectory
-    # plt.figure(figsize=(8, 6))
-    # plt.plot(trajectory_points_x, trajectory_points_y, marker='o', label='Trajectory Points')
-    # plt.title('Trajectory of Vehicle')
-    # plt.xlabel('X (meters)')
-    # plt.ylabel('Y (meters)')
-    # plt.grid(True)
-    # plt.legend()
-    # # Save the figure
-    # plt.savefig('trajectory_plot.png')
-
-    # Update the ego_plan with the generated trajectory points
-    ego_plan.points = trajectory_points
-    # print('ego_plan.points', ego_plan.points)
-
-    # plt.plot(ego_plan.points.x, ego_plan.points.y, marker='o', label='Trajectory Points')
-    # plt.savefig('trajectory_plot.png')
-    ego_plan.guidespeed = ego_state.v  # Final velocity
-    ego_plan.guideangle = ego_state.yaw  # Final heading
-    ego_plan.timestamp = int(rospy.Time.now().to_sec())
-
-    # Decision-making (example behavior)
-    ego_decision.drivebehavior = 2  # Drive behavior, this could be adjusted
-
-    rospy.loginfo(f"Planning result: ego_plan={ego_plan}, ego_decision={ego_decision}")
 
     return ego_plan, ego_decision
 # 检查数据是否齐全，且仅在数据齐全时处理
 def check_and_process_data():
     if all(data_status.values()):
         rospy.loginfo("All data received, processing planning...")
+        
 
         # 经纬度转为笛卡尔坐标
-        lon_lat_converter = lon_lat_to_xy([frame_data["sensorgps"]])
-        state_dict = lon_lat_converter.get_pos()
+        # lon_lat_converter = lon_lat_to_xy([frame_data["sensorgps"]])
+        # state_dict = lon_lat_converter.get_pos()
+        state_dict = None
 
         # 进行规划
         ego_plan, ego_decision = cal_action(state_dict)
