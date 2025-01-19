@@ -1,6 +1,6 @@
 # import autograd.numpy as np
 # from autograd import grad
-import numpy as nup
+import numpy as np
 import scipy.interpolate
 import matplotlib.pyplot as plt
 
@@ -74,7 +74,7 @@ def spline_y(s, path, spline_idx):
 
 
 def find_best_s(q, path, ds=0.05, enable_global_search=False, sq_dist_tol=100):
-    x, y, _, _, s = q
+    x, y, _, _, s = qenumerate
 
     if s < 0:
         return 0
@@ -125,24 +125,25 @@ def heading(s, path, spline_idx):
 def get_path_obj(x_list, y_list):
 
     # trajectory points
-    x_points = np.array(remove_repeated_items_at_end(x_list))
-    y_points = np.array(remove_repeated_items_at_end(y_list))
-
+    # x_points = np.array(remove_repeated_items_at_end(x_list))
+    # y_points = np.array(remove_repeated_items_at_end(y_list))
+    x_points = np.array(x_list)
+    y_points = np.array(y_list)
     # Calculate distances between consecutive points
-    distances = nup.sqrt(nup.diff(x_points) ** 2 + nup.diff(y_points) ** 2)
-    cumulative_arc_length = nup.insert(nup.cumsum(distances), 0, 0)
+    distances = np.sqrt(np.diff(x_points) ** 2 + np.diff(y_points) ** 2)
+    cumulative_arc_length = np.insert(np.cumsum(distances), 0, 0)
 
     # Use cumulative arc length for parameterization
     param = cumulative_arc_length
 
     segment_length = 4  # Or another number > 3
-    segment_indices = nup.arange(0, len(x_points), segment_length)
+    segment_indices = np.arange(0, len(x_points), segment_length)
     # if segment_indices[-1] != len(x_points) - 1:
     #     segment_indices = np.append(segment_indices, len(x_points) - 1)
 
     num_segments = len(segment_indices) - 1
-    x_coefs = nup.zeros((num_segments, 4))
-    y_coefs = nup.zeros((num_segments, 4))
+    x_coefs = np.zeros((num_segments, 4))
+    y_coefs = np.zeros((num_segments, 4))
 
     # Compute coefficients for each segment
     for i in range(num_segments):

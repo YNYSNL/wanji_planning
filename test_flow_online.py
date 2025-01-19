@@ -18,7 +18,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cvxpy
 from MotionPlanning.Control.MPC_XY_Frame import P, Node
-from transform import lon_lat_to_xy, xy_to_lon_lat
+from transform import lon_lat_to_xy, xy_to_lon_lat, lon_lat_to_xy_map
 import logging
 from planner import CACS_plan, bag_plan
 
@@ -103,7 +103,6 @@ data_status = {
     "hdroutetoglobal": True
 }
 
-# 更新缓存数据并检查是否准备好进行规划data
 def update_frame_data(topic, msg):
     if topic == "/sensorgps":
         frame_data["sensorgps"] = msg
@@ -152,13 +151,13 @@ def cal_action(sensor_data, reference_data):
     ego_decision = decisionbehavior()
     ego_plan.points = roadpoint()
 
-    # ego_plan, ego_decision = CACS_plan(sensor_data, reference_data)
+    ego_plan, ego_decision = CACS_plan(sensor_data, reference_data, ego_plan, ego_decision)
+# 
+    # global bag_data
+    # global bag_time
 
-    global bag_data
-    global bag_time
-
-    ego_plan, ego_decision = bag_plan(bag_data, bag_time, ego_plan, ego_decision)
-    bag_time += 1
+    # ego_plan, ego_decision = bag_plan(bag_data, bag_time, ego_plan, ego_decision)
+    # bag_time += 1
 
     return ego_plan, ego_decision
 # 检查数据是否齐全，且仅在数据齐全时处理
@@ -168,12 +167,12 @@ def check_and_process_data():
         
 
         # 经纬度转为笛卡尔坐标
-        # lon_lat_converter_state = lon_lat_to_xy([frame_data["sensorgps"]])
-        # state_dict = lon_lat_converter_state.get_pos()
+        lon_lat_converter_state = lon_lat_to_xy([frame_data["sensorgps"]])
+        state_dict = lon_lat_converter_state.get_pos()
 
         # lon_lat_converter_ref = lon_lat_to_xy_map([frame_data["hdroutetoglobal"]])
         # ref_dict = lon_lat_converter_ref.get_pos()
-        state_dict = None
+        # state_dict = None
         ref_dict = None
 
 
