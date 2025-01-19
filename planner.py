@@ -1,10 +1,13 @@
 import copy
 import numpy as np
 import rospy
+from path_handling import load_splines, SplinePath, find_best_s, get_path_obj
 
-def CACS_plan(data):
-    DataFromEgo = copy.deepcopy(data)
+def CACS_plan(state_data, reference_data):
+    DataFromEgo = copy.deepcopy(state_data)
     # print('DataFromEgo', DataFromEgo)
+
+    path_obj = get_path_obj(reference_data['0']['x'].tolist(), reference_data['0']['y'].tolist())
 
     # Get the current sensor data
     sensorgps_data = frame_data.get("sensorgps")
@@ -44,10 +47,13 @@ def CACS_plan(data):
         point.a = a
         point.jerk = 0  # Assuming no jerk (smooth motion)
         point.lanewidth = 3.5  # Default lane width, adjust if needed
-        point.s = ego_state.x  # s position along the trajectory (simplified)
+        q = [point.x, point.y, 0, 0, 0]
+        point.s = find_best_s(q, path_obj, enable_global_search=True)
+        print(f's at time{t} is {point.s}')
         ego_state.update(a, delta=0.0, direct=1.0)  # Assume no steering (delta=0) for simplicity
         # xy_converter = xy_to_lon_lat([ego_state], [state_dict])te(100)
         # transformed_data = xy_converter.transform()
+
 
         # 获取转换后的经纬度
         # lat, lon = transformed_data[0]["lat"], transformed_data[0]["lon"]

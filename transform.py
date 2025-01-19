@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 import pandas as pd
 import rospy
 
+
 # 设置中文字体
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']  # 指定默认字体为黑体
 matplotlib.rcParams['axes.unicode_minus'] = False     # 解决保存图像时负号'-'显示为方块的问题
@@ -41,6 +42,27 @@ class lon_lat_to_xy:
                 'heading': float(data.heading),  # 航向角
                 'a': 0  # 加速度默认为0，您可以根据需要计算
             }
+        return state_dict
+
+class lon_lat_to_xy_map:
+    def __init__(self, data_list, flag1=False):
+        self.data_list = data_list
+        self.veh_num = len(self.data_list)
+        self.flag1 = flag1
+
+
+    def get_pos(self):
+        state_dict = {}
+
+        data = self.data_list.map.point
+        # 经纬度转为笛卡尔坐标
+        x, y = proj(data.lon, data.lat)
+        state_dict[str(veh)] = {
+            'x': x,
+            'y': y,
+            'v': float(data.velocity),  # 车辆速度
+            'heading': float(data.heading),  # 航向角
+        }
         return state_dict
 
 class xy_to_lon_lat:

@@ -25,6 +25,8 @@ from planner import CACS_plan, bag_plan
 logging.basicConfig(filename='test_flow_online.log', level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 global pub_ego_plan
 global pub_ego_decision
+reference_line_received = False
+
 global bag_time
 bag_time = 0
 global bag_data
@@ -89,27 +91,37 @@ bag_data = {
 frame_data = {
     "sensorgps": None,
     "objectTrack": None,
-    "actuator": None
+    "actuator": None,
+    "hdroutetoglobal": None
 }
 
 # 数据状态标志
 data_status = {
     "sensorgps": False,
     "objectTrack": False,
-    "actuator": False
+    "actuator": False,
+    "hdroutetoglobal": True
 }
 
-# 更新缓存数据并检查是否准备好进行规划
+# 更新缓存数据并检查是否准备好进行规划data
 def update_frame_data(topic, msg):
     if topic == "/sensorgps":
         frame_data["sensorgps"] = msg
         data_status["sensorgps"] = True
+        rospy.loginfo("报告刘工！sensorgps received!")
     elif topic == "/objectTrack/track_results8CornerForRVIZ":
         frame_data["objectTrack"] = msg
         data_status["objectTrack"] = True
+        rospy.loginfo("报告刘工！objectTrack received!")
     elif topic == "/actuator":
         frame_data["actuator"] = msg
         data_status["actuator"] = True
+        # rospy.loginfo("报告刘工！actuator received!")
+    elif topic == "/hdroutetoglobal":
+        frame_data["hdroutetoglobal"] = msg
+        data_status["hdroutetoglobal"] = True
+
+        rospy.loginfo("报告刘工！hdroutetoglobal received!")
     # rospy.loginfo(f"Received data from topic {topic}: {msg}")
 
 # 回调函数
@@ -126,20 +138,27 @@ def callback_actuator(data):
     update_frame_data("/actuator", data)
     check_and_process_data()
 
-def cal_action(data):
+def callback_hdroutetoglobal(data):
+    global reference_line_received
+    print(data)
+    if not reference_line_received:
+        reference_line_received = True
+        update_frame_data("/hdroutetoglobal", data)
+        check_and_process_data()
+
+# 规划动作
+def cal_action(sensor_data, reference_data):
     ego_plan = planningmotion()
     ego_decision = decisionbehavior()
     ego_plan.points = roadpoint()
 
-    # ego_plan, ego_decision = CACS_plan(data)
+    # ego_plan, ego_decision = CACS_plan(sensor_data, reference_data)
 
     global bag_data
     global bag_time
 
     ego_plan, ego_decision = bag_plan(bag_data, bag_time, ego_plan, ego_decision)
     bag_time += 1
-
-
 
     return ego_plan, ego_decision
 # 检查数据是否齐全，且仅在数据齐全时处理
@@ -149,12 +168,18 @@ def check_and_process_data():
         
 
         # 经纬度转为笛卡尔坐标
-        # lon_lat_converter = lon_lat_to_xy([frame_data["sensorgps"]])
-        # state_dict = lon_lat_converter.get_pos()
+        # lon_lat_converter_state = lon_lat_to_xy([frame_data["sensorgps"]])
+        # state_dict = lon_lat_converter_state.get_pos()
+
+        # lon_lat_converter_ref = lon_lat_to_xy_map([frame_data["hdroutetoglobal"]])
+        # ref_dict = lon_lat_converter_ref.get_pos()
         state_dict = None
+        ref_dict = None
+
+
 
         # 进行规划
-        ego_plan, ego_decision = cal_action(state_dict)
+        ego_plan, ego_decision = cal_action(state_dict, ref_dict)
 
         # 发布规划结果
         pub_ego_plan.publish(ego_plan)
@@ -169,6 +194,7 @@ def reset_data_status():
     global data_status
     for key in data_status:
         data_status[key] = False
+        data_status["hdroutetoglobal"] = True
 
 def main():
     # 初始化ROS节点
@@ -183,6 +209,7 @@ def main():
     # 订阅传感器数据
     rospy.Subscriber("/objectTrack/track_results8CornerForRVIZ", sensorobjects, callback_objectTrack, queue_size=3)
     rospy.Subscriber("/actuator", actuator, callback_actuator, queue_size=3)
+    # rospy.Subscriber("/hdroutetoglobal", hdroutetoglobal, callback_hdroutetoglobal, queue_size=1)
     rospy.Subscriber("/sensorgps", sensorgps, callback_sensorgps, queue_size=3)
 
     rospy.loginfo("ROS node initialized and waiting for data...")
