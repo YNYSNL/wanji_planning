@@ -1,5 +1,7 @@
 import copy
 import numpy as np
+import matplotlib.pyplot as plt
+import csv
 import rospy
 from path_handling import load_splines, SplinePath, find_best_s, get_path_obj
 from MotionPlanning.Control.MPC_XY_Frame import P, Node
@@ -25,8 +27,8 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
 
 
     ego_state = Node(
-        x=DataFromEgo['0'].get("x", 0.0) * 100 + 36000, 
-        y=DataFromEgo['0'].get("y", 0.0) * 100 + 7582, 
+        x=DataFromEgo['0'].get("x", 0.0) * 100, 
+        y=DataFromEgo['0'].get("y", 0.0) * 100, 
         yaw=DataFromEgo['0'].get("heading", 0.0), 
         v=DataFromEgo['0'].get("v", 0.0) * 100, 
         direct=1.0
@@ -78,6 +80,15 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
 
     # logging.info(f"trajectory_points_x: {trajectory_points_x}")
 
+    with open('trajectory_points.csv', mode='w', newline='') as file:
+        writer = csv.writer(file)
+        
+        # Write the header
+        writer.writerow(['x', 'y'])
+        
+        # Write the data
+        for x, y in zip(trajectory_points_x, trajectory_points_y):
+            writer.writerow([x, y])
 
     # # Plot the trajectory
     # plt.figure(figsize=(8, 6))
@@ -89,6 +100,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     # plt.legend()
     # # Save the figure
     # plt.savefig('trajectory_plot.png')
+    # plt.close()
 
     # Update the ego_plan with the generated trajectory points
     ego_plan.points = trajectory_points
