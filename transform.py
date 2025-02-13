@@ -38,9 +38,11 @@ class lon_lat_to_xy:
             state_dict[str(veh)] = {
                 'x': x,
                 'y': y,
+                'gx': data.lon,
+                'gy':data.lat,
                 'v': float(data.velocity),  # 车辆速度
                 'heading': float(data.heading),  # 航向角
-                'a': 0  # 加速度默认为0，您可以根据需要计算
+                'a': 0  
             }
         return state_dict
 

@@ -14,6 +14,20 @@ from common_msgs.msg import sensorobject
 from common_msgs.msg import sensorobjects
 from common_msgs.msg import planningmotion
 from common_msgs.msg import decisionbehavior
+from pyproj import Proj, Transformer
+
+def xy_to_latlon(lon_origin, lat_origin, x, y):
+
+    proj_string = "+proj=tmerc +lon_0=" + str(lon_origin) + " +lat_0=" + str(lat_origin) + " +ellps=WGS84"
+
+    proj = Proj(proj_string)
+
+    transformer_inv = Transformer.from_crs(proj_string, "epsg:4326", always_xy=True)
+
+    lon_target, lat_target = transformer_inv.transform(x + proj(lon_origin, lat_origin)[0], 
+                                                       y + proj(lon_origin, lat_origin)[1])
+
+    return lon_target, lat_target
 
 def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     DataFromEgo = copy.deepcopy(state_data)
@@ -31,13 +45,14 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         y=DataFromEgo['0'].get("y", 0.0) * 100, 
         yaw=DataFromEgo['0'].get("heading", 0.0), 
         v=DataFromEgo['0'].get("v", 0.0) * 100, 
+        gx=DataFromEgo['0'].get("gx", 0.0) * 100, 
+        gy=DataFromEgo['0'].get("gy", 0.0) * 100, 
         direct=1.0
     )
     # Acceleration and time steps for the motion plan
     a = 0  # Constant acceleration
     # t_max = 3  # Total time for the trajectory
     time_steps = 964  # Number of time steps to break down the trajectory
-    dt = 1/150  # Time step for each update
 
     # Generate the trajectory using the Node's kinematic update
     trajectory_points = []
@@ -49,10 +64,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         point = roadpoint()
         point.x = ego_state.x  # Updated x-coordinate
         point.y = ego_state.y  # Updated y-coordinate    relativetime: 0.0
-
-        point.s = 1089 + t * 0.1 # Updated s-coordinate
-        # point.gx = ego_state.x  # 经度
-        # point.gy = ego_state.y  # 纬度
+        point.gx, point.gy = xy_to_latlon(ego_state.gx,ego_state.gy,point.x,point.y)
 
         point.speed = ego_state.v / 100  # Updated velocity
         point.heading = 0  # Updated heading
@@ -61,6 +73,8 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         point.jerk = 0  # Assuming no jerk (smooth motion)
         point.lanewidth = 0  # Default lane width, adjust if needed
         ego_state.update(200, delta=0.0, direct=1.0)  # Assume no steering (delta=0) for simplicity
+
+        point.s = t * 0.1 * ego_state.v # Updated s-coordinate
         # xy_converter = xy_to_lon_lat([ego_state], [state_dict])te(100)
         # transformed_data = xy_converter.transform()
         trajectory_points.append(point)

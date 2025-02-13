@@ -52,18 +52,19 @@ for topic, msg, t in bag.read_messages(topics='/planningmotion'):
         p.y = point.y
         p.speed = point.speed
         p.heading = point.heading
-        p.jerk = point.jerk
+        # p.jerk = point.jerk
         # p.lanewidth = point.lanewidth
         p.s = point.s
-        # p.gx = point.gx
-        # p.gy = point.gy
-        # p.roadtype = point.roadtype
+        p.gx = point.gx
+        p.gy = point.gy
+        p.roadtype = point.roadtype
         p.a = point.a
-        # p.lanetype = point.lanetype
-        # p.turnlight = point.turnlight
+        p.lanetype = point.lanetype
+        p.turnlight = point.turnlight
         # p.mergelanetype = point.mergelanetype
         # p.sensorlanetype = point.sensorlanetype
-        # p.curvature = point.curvature
+        p.curvature = point.curvature
+        p.relativeTime = point.relativeTime
         # p.dkappa = point.dkappa
         # p.ddkappa = point.ddkappa
         # p.sideroadwidth = point.sideroadwidth
@@ -139,7 +140,7 @@ def callback_actuator(data):
 
 def callback_hdroutetoglobal(data):
     global reference_line_received
-    print(data)
+    # print(data)
     if not reference_line_received:
         reference_line_received = True
         update_frame_data("/hdroutetoglobal", data)
@@ -203,7 +204,7 @@ def main():
     global pub_ego_decision
 
     pub_ego_plan = rospy.Publisher("/planningmotion", planningmotion, queue_size=5)
-    pub_ego_decision = rospy.Publisher("/behaviordecision0", decisionbehavior, queue_size=5)
+    pub_ego_decision = rospy.Publisher("/behaviordecision", decisionbehavior, queue_size=5)
 
     # 订阅传感器数据
     rospy.Subscriber("/objectTrack/track_results8CornerForRVIZ", sensorobjects, callback_objectTrack, queue_size=3)
