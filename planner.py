@@ -45,14 +45,14 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         y=DataFromEgo['0'].get("y", 0.0) * 100, 
         yaw=DataFromEgo['0'].get("heading", 0.0), 
         v=DataFromEgo['0'].get("v", 0.0) * 100, 
-        gx=DataFromEgo['0'].get("gx", 0.0) * 100, 
-        gy=DataFromEgo['0'].get("gy", 0.0) * 100, 
+        gx=DataFromEgo['0'].get("gx", 0.0), 
+        gy=DataFromEgo['0'].get("gy", 0.0), 
         direct=1.0
     )
     # Acceleration and time steps for the motion plan
-    a = 0  # Constant acceleration
+    a = 2  # Constant acceleration
     # t_max = 3  # Total time for the trajectory
-    time_steps = 964  # Number of time steps to break down the trajectory
+    time_steps = 20  # Number of time steps to break down the trajectory
 
     # Generate the trajectory using the Node's kinematic update
     trajectory_points = []
@@ -64,10 +64,13 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         point = roadpoint()
         point.x = ego_state.x  # Updated x-coordinate
         point.y = ego_state.y  # Updated y-coordinate    relativetime: 0.0
+        # print('gx',ego_state.gx,'gy',ego_state.gy)
         point.gx, point.gy = xy_to_latlon(ego_state.gx,ego_state.gy,point.x,point.y)
 
-        point.speed = ego_state.v / 100  # Updated velocity
+        point.speed = 15 # ego_state.v / 100  # Updated velocity
         point.heading = 0  # Updated heading
+        point.roadtype = 128
+        point.turnlight = 2
         # print(f'heading is {point.heading}')
         point.a = a  
         point.jerk = 0  # Assuming no jerk (smooth motion)

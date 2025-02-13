@@ -30,7 +30,7 @@ reference_line_received = False
 global bag_time
 bag_time = 0
 global bag_data
-file_path = '/home/wanji/tongji_vehicle/2025-01-18-17-30-22.bag'
+file_path = '/media/wanji/ssd2T/20250211-bag/2025-02-11-15-31-30.bag'
 # 打开bag文件
 bag = rosbag.Bag(file_path, 'r')
 
@@ -64,7 +64,7 @@ for topic, msg, t in bag.read_messages(topics='/planningmotion'):
         # p.mergelanetype = point.mergelanetype
         # p.sensorlanetype = point.sensorlanetype
         p.curvature = point.curvature
-        p.relativeTime = point.relativeTime
+        p.relativetime = point.relativetime
         # p.dkappa = point.dkappa
         # p.ddkappa = point.ddkappa
         # p.sideroadwidth = point.sideroadwidth
