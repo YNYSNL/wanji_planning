@@ -25,6 +25,7 @@ from planner import CACS_plan, bag_plan
 logging.basicConfig(filename='test_flow_online.log', level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 global pub_ego_plan
 global pub_ego_decision
+global reference_line_received
 reference_line_received = False
 
 global bag_time
@@ -101,7 +102,7 @@ data_status = {
     "sensorgps": False,
     "objectTrack": False,
     "actuator": False,
-    "hdroutetoglobal": True
+    "hdroutetoglobal": False
 }
 
 def update_frame_data(topic, msg):
@@ -209,7 +210,7 @@ def main():
     # 订阅传感器数据
     rospy.Subscriber("/objectTrack/track_results8CornerForRVIZ", sensorobjects, callback_objectTrack, queue_size=3)
     rospy.Subscriber("/actuator", actuator, callback_actuator, queue_size=3)
-    # rospy.Subscriber("/hdroutetoglobal", hdroutetoglobal, callback_hdroutetoglobal, queue_size=1)
+    rospy.Subscriber("/hdroutetoglobal", hdroutetoglobal, callback_hdroutetoglobal, queue_size=1)
     rospy.Subscriber("/sensorgps", sensorgps, callback_sensorgps, queue_size=3)
 
     rospy.loginfo("ROS node initialized and waiting for data...")

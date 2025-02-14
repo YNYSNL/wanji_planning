@@ -36,8 +36,8 @@ class lon_lat_to_xy:
             # 经纬度转为笛卡尔坐标
             x, y = proj(data.lon, data.lat)
             state_dict[str(veh)] = {
-                'x': x,
-                'y': y,
+                'x': 0,
+                'y': 0,
                 'gx': data.lon,
                 'gy':data.lat,
                 'v': float(data.velocity),  # 车辆速度

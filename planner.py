@@ -65,7 +65,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         point.x = ego_state.x  # Updated x-coordinate
         point.y = ego_state.y  # Updated y-coordinate    relativetime: 0.0
         # print('gx',ego_state.gx,'gy',ego_state.gy)
-        point.gx, point.gy = xy_to_latlon(ego_state.gx,ego_state.gy,point.x,point.y)
+        point.gx, point.gy = xy_to_latlon(ego_state.gx,ego_state.gy,point.x/100,point.y/100)
 
         point.speed = 15 # ego_state.v / 100  # Updated velocity
         point.heading = 0  # Updated heading
