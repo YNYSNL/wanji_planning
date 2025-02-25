@@ -21,6 +21,8 @@ from MotionPlanning.Control.MPC_XY_Frame import P, Node
 from transform import lon_lat_to_xy, xy_to_lon_lat, lon_lat_to_xy_map
 import logging
 from planner import CACS_plan, bag_plan
+import os
+import json
 
 logging.basicConfig(filename='test_flow_online.log', level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 global pub_ego_plan
@@ -31,7 +33,8 @@ reference_line_received = False
 global bag_time
 bag_time = 0
 global bag_data
-file_path = '/media/wanji/ssd2T/20250211-bag/2025-02-11-15-31-30.bag'
+# file_path = '/media/wanji/ssd2T/20250211-bag/2025-02-11-15-31-30.bag'
+file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
 # 打开bag文件
 bag = rosbag.Bag(file_path, 'r')
 
@@ -109,21 +112,21 @@ def update_frame_data(topic, msg):
     if topic == "/sensorgps":
         frame_data["sensorgps"] = msg
         data_status["sensorgps"] = True
-        rospy.loginfo("报告刘工！sensorgps received!")
-    elif topic == "/objectTrack/track_results8CornerForRVIZ":
+        print("sensorgps received!")  # 使用普通的print替代rospy.loginfo
+        
+    elif topic == "/objectTrack/track_results":
         frame_data["objectTrack"] = msg
         data_status["objectTrack"] = True
-        rospy.loginfo("报告刘工！objectTrack received!")
+        print("objectTrack received!")
+        
     elif topic == "/actuator":
         frame_data["actuator"] = msg
         data_status["actuator"] = True
-        # rospy.loginfo("报告刘工！actuator received!")
+        
     elif topic == "/hdroutetoglobal":
         frame_data["hdroutetoglobal"] = msg
         data_status["hdroutetoglobal"] = True
-
-        rospy.loginfo("报告刘工！hdroutetoglobal received!")
-    # rospy.loginfo(f"Received data from topic {topic}: {msg}")
+        print("hdroutetoglobal received!")
 
 # 回调函数
 def callback_sensorgps(data):
@@ -139,14 +142,25 @@ def callback_actuator(data):
     update_frame_data("/actuator", data)
     check_and_process_data()
 
-def callback_hdroutetoglobal(data):
-    global reference_line_received
-    # print(data)
-    if not reference_line_received:
-        reference_line_received = True
-        update_frame_data("/hdroutetoglobal", data)
-        check_and_process_data()
+# def callback_hdroutetoglobal(data):
+#     global reference_line_received
+#     # print(data)
+#     if not reference_line_received:
+#         reference_line_received = True
+#         update_frame_data("/hdroutetoglobal", data)
+#         check_and_process_data()
 
+def callback_hdroutetoglobal(data):
+    """处理参考线数据"""
+    if not frame_data.get("hdroutetoglobal"):
+        # 第一次收到参考线数据时初始化
+        frame_data["hdroutetoglobal"] = data
+        reference_data = {"hdroutetoglobal": data}
+        from planner import init_reference_path
+        init_reference_path(reference_data)
+    
+    update_frame_data("/hdroutetoglobal", data)
+    check_and_process_data()
 # 规划动作
 def cal_action(sensor_data, reference_data):
     ego_plan = planningmotion()
@@ -175,7 +189,9 @@ def check_and_process_data():
         # lon_lat_converter_ref = lon_lat_to_xy_map([frame_data["hdroutetoglobal"]])
         # ref_dict = lon_lat_converter_ref.get_pos()
         # state_dict = None
-        ref_dict = None
+        ref_dict = {
+            "hdroutetoglobal": frame_data["hdroutetoglobal"]
+        }
 
 
 
@@ -196,26 +212,111 @@ def reset_data_status():
     for key in data_status:
         data_status[key] = False
         data_status["hdroutetoglobal"] = True
-
-def main():
-    # 初始化ROS节点
-    rospy.init_node("ros_topic_processor", anonymous=True)
-
-    global pub_ego_plan
-    global pub_ego_decision
-
+def offline_test():
+    """离线测试模式"""
+    global bag_data, frame_data, data_status
+    
+    # 打开bag文件
+    file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
+    bag = rosbag.Bag(file_path, 'r')
+    
+    # 按时间戳组织数据
+    frame_timestamps = {}  # 存储每个时间戳对应的数据
+    
+    # 读取所有相关话题的消息
+    topics = ['/sensorgps', '/objectTrack/track_results', 
+             '/actuator', '/hdroutetoglobal']
+    
+    print("Reading bag file...")
+    for topic, msg, t in bag.read_messages(topics=topics):
+        timestamp = t.to_sec()
+        # 将时间戳四舍五入到最近的0.1秒，以便对齐不同话题的数据
+        rounded_timestamp = round(timestamp * 10) / 10
+        
+        if rounded_timestamp not in frame_timestamps:
+            frame_timestamps[rounded_timestamp] = {}
+        frame_timestamps[rounded_timestamp][topic] = msg
+    
+    bag.close()
+    print(f"Found {len(frame_timestamps)} frames in bag file")
+    
+    # 按时间戳顺序处理每一帧
+    sorted_timestamps = sorted(frame_timestamps.keys())
+    
+    # 创建结果发布器
     pub_ego_plan = rospy.Publisher("/planningmotion", planningmotion, queue_size=5)
     pub_ego_decision = rospy.Publisher("/behaviordecision", decisionbehavior, queue_size=5)
+    
+    # 处理每一帧数据
+    for i, timestamp in enumerate(sorted_timestamps):
+        frame = frame_timestamps[timestamp]
+        print(f"\nProcessing frame {i+1}/{len(sorted_timestamps)}")
+        
+        # 更新frame_data
+        if '/sensorgps' in frame:
+            update_frame_data("/sensorgps", frame['/sensorgps'])
+        if '/objectTrack/track_results' in frame:
+            update_frame_data("/objectTrack/track_results", frame['/objectTrack/track_results'])
+        if '/actuator' in frame:
+            update_frame_data("/actuator", frame['/actuator'])
+        if '/hdroutetoglobal' in frame:
+            update_frame_data("/hdroutetoglobal", frame['/hdroutetoglobal'])
 
-    # 订阅传感器数据
-    rospy.Subscriber("/objectTrack/track_results8CornerForRVIZ", sensorobjects, callback_objectTrack, queue_size=3)
-    rospy.Subscriber("/actuator", actuator, callback_actuator, queue_size=3)
-    rospy.Subscriber("/hdroutetoglobal", hdroutetoglobal, callback_hdroutetoglobal, queue_size=1)
-    rospy.Subscriber("/sensorgps", sensorgps, callback_sensorgps, queue_size=3)
+        print(data_status.values())       
+        # 检查数据是否完整并进行规划
+        if all(data_status.values()):
+            print("Processing planning for frame...")
+            
+            # 经纬度转为笛卡尔坐标
+            lon_lat_converter_state = lon_lat_to_xy([frame_data["sensorgps"]])
+            state_dict = lon_lat_converter_state.get_pos()
+            
+            ref_dict = {
+                "hdroutetoglobal": frame_data["hdroutetoglobal"]
+            }
+            
+            # 进行规划
+            ego_plan, ego_decision = cal_action(state_dict, ref_dict)
+            # 打印规划结果
+            print(ego_plan)
+            print(ego_decision)
 
-    rospy.loginfo("ROS node initialized and waiting for data...")
-    rate = rospy.Rate(100)
-    rospy.spin()
+            
+            # 保存或可视化结果
+            # save_frame_results(i, timestamp, ego_plan, ego_decision)
+            print('---')
+            
+            # 重置数据状态标志
+            reset_data_status()
+        else:
+            print("Incomplete data for this frame, skipping...")
+
+def main():
+    """主函数"""
+    # 选择运行模式
+    if len(sys.argv) > 1 and sys.argv[1] == '--offline':
+        print("Running in offline mode...")
+        offline_test()
+    else:
+        print("Running in online mode...")
+        # 初始化ROS节点
+        rospy.init_node("ros_topic_processor", anonymous=True)
+        
+        global pub_ego_plan
+        global pub_ego_decision
+        
+        pub_ego_plan = rospy.Publisher("/planningmotion", planningmotion, queue_size=5)
+        pub_ego_decision = rospy.Publisher("/behaviordecision", decisionbehavior, queue_size=5)
+        
+        # 订阅传感器数据
+        rospy.Subscriber("/objectTrack/track_results8CornerForRVIZ", sensorobjects, callback_objectTrack, queue_size=3)
+        rospy.Subscriber("/actuator", actuator, callback_actuator, queue_size=3)
+        rospy.Subscriber("/hdroutetoglobal", hdroutetoglobal, callback_hdroutetoglobal, queue_size=1)
+        rospy.Subscriber("/sensorgps", sensorgps, callback_sensorgps, queue_size=3)
+        
+        rospy.loginfo("ROS node initialized and waiting for data...")
+        rate = rospy.Rate(100)
+        rospy.spin()
 
 if __name__ == "__main__":
     main()

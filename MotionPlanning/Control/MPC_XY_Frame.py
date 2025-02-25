@@ -36,7 +36,7 @@ class P:
     iter_max = 5  # max iteration
     target_speed = 20.0 / 3.6  # target speed
     N_IND = 10  # search index number
-    dt = 1/150  # time step
+    dt = 0.1  # time step
     d_dist = 1.0  # dist step
     du_res = 0.1  # threshold for stopping iteration
 

@@ -16,6 +16,55 @@ from common_msgs.msg import planningmotion
 from common_msgs.msg import decisionbehavior
 from pyproj import Proj, Transformer
 
+# 全局变量存储参考线信息
+ref_lons = []
+ref_lats = []
+ref_s = []
+vehicle_init_pos = None  # 存储车辆初始位置的全局变量
+
+def init_reference_path(reference_data):
+    """初始化参考线信息"""
+    global ref_lons, ref_lats, ref_s, vehicle_init_pos
+    
+    try:
+        # 因为传入的是 ref_dict，所以需要先获取 hdroutetoglobal 数据
+        hd_route = reference_data["hdroutetoglobal"]
+        
+        # 遍历 hdroutetoglobal.map (hdmap[] 数组)
+        for hdmap_msg in hd_route.map:
+            # 遍历每个 hdmap 中的 point (mapformat[] 数组)
+            for point in hdmap_msg.point:
+                ref_lons.append(point.lon)
+                ref_lats.append(point.lat)
+                
+    except Exception as e:
+        print("Error processing reference_data:", e)
+        print("reference_data:", reference_data)
+        return None
+    
+    # 计算参考线的累计距离，但先不赋值给ref_s
+    temp_s = [0]
+    for i in range(1, len(ref_lons)):
+        dist = calc_distance(ref_lons[i-1], ref_lats[i-1], ref_lons[i], ref_lats[i])
+        temp_s.append(temp_s[-1] + dist)
+    
+    # rospy.loginfo("参考线初始化完成，共 %d 个点", len(ref_lons))
+    return True
+
+def calc_distance(lon1, lat1, lon2, lat2):
+    """计算两点间大地距离"""
+    R = 6371000  # 地球半径(米)
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2)
+    delta_phi = np.radians(lat2 - lat1)
+    delta_lambda = np.radians(lon2 - lon1)
+    
+    a = np.sin(delta_phi/2) * np.sin(delta_phi/2) + \
+        np.cos(phi1) * np.cos(phi2) * \
+        np.sin(delta_lambda/2) * np.sin(delta_lambda/2)
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    return R * c
+
 def xy_to_latlon(lon_origin, lat_origin, x, y):
 
     proj_string = "+proj=tmerc +lon_0=" + str(lon_origin) + " +lat_0=" + str(lat_origin) + " +ellps=WGS84"
@@ -30,6 +79,7 @@ def xy_to_latlon(lon_origin, lat_origin, x, y):
     return lon_target, lat_target
 
 def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
+    global ref_lons, ref_lats, ref_s, vehicle_init_pos
     DataFromEgo = copy.deepcopy(state_data)
     # print('DataFromEgo', DataFromEgo)
 
@@ -38,7 +88,9 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
 
     # v0 = sensorgps_data.velocity
     # heading = sensorgps_data.heading
-
+    if not ref_lons and reference_data:
+        print("reference_data type:", type(reference_data))
+        init_reference_path(reference_data)
 
     ego_state = Node(
         x=DataFromEgo['0'].get("x", 0.0) * 100, 
@@ -49,6 +101,38 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         gy=DataFromEgo['0'].get("gy", 0.0), 
         direct=1.0
     )
+    current_pos = (ego_state.gx, ego_state.gy)
+    
+    # 如果是第一次运行，初始化车辆初始位置
+    if vehicle_init_pos is None and ref_lons:
+        vehicle_init_pos = current_pos
+        # 找到距离初始位置最近的参考线点
+        distances = []
+        for i in range(len(ref_lons)):
+            dist = calc_distance(vehicle_init_pos[0], vehicle_init_pos[1], ref_lons[i], ref_lats[i])
+            distances.append(dist)
+        init_idx = np.argmin(distances)
+        
+        # 预先计算相邻点之间的距离
+        point_distances = []
+        for j in range(len(ref_lons)-1):
+            dist = calc_distance(ref_lons[j], ref_lats[j], ref_lons[j+1], ref_lats[j+1])
+            point_distances.append(dist)
+            
+        ref_s = [0] * len(ref_lons)  # 预分配列表空间
+        
+        # 计算init_idx之前的点的累积距离（负值）
+        curr_dist = 0
+        for i in range(init_idx - 1, -1, -1):
+            curr_dist += point_distances[i]
+            ref_s[i] = -curr_dist
+            
+        # 计算init_idx之后的点的累积距离（正值）
+        curr_dist = 0
+        for i in range(init_idx, len(ref_lons)-1):
+            curr_dist += point_distances[i]
+            ref_s[i+1] = curr_dist
+          
     # Acceleration and time steps for the motion plan
     a = 2  # Constant acceleration
     # t_max = 3  # Total time for the trajectory
@@ -77,7 +161,26 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         point.lanewidth = 0  # Default lane width, adjust if needed
         ego_state.update(200, delta=0.0, direct=1.0)  # Assume no steering (delta=0) for simplicity
 
-        point.s = t * 0.1 * ego_state.v # Updated s-coordinate
+        if ref_lons:
+            distances = []
+            for i in range(len(ref_lons)):
+                dist = calc_distance(point.gx, point.gy, ref_lons[i], ref_lats[i])
+                distances.append(dist)
+            
+            nearest_idx = np.argmin(distances)
+            # 使用重新计算的ref_s
+            point.s = ref_s[nearest_idx]
+            
+            # 如果需要，可以加入到当前位置的精确距离修正
+            if nearest_idx > 0:
+                # 计算到最近点的精确距离
+                exact_dist = calc_distance(point.gx, point.gy, ref_lons[nearest_idx], ref_lats[nearest_idx])
+                # 根据车辆位置在参考线左右侧决定距离正负
+                # 这里需要根据实际情况补充判断逻辑
+                point.s += exact_dist
+        else:
+            point.s = t * 0.1 * ego_state.v
+
         # xy_converter = xy_to_lon_lat([ego_state], [state_dict])te(100)
         # transformed_data = xy_converter.transform()
         trajectory_points.append(point)
@@ -127,7 +230,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     # plt.savefig('trajectory_plot.png')
     ego_plan.guidespeed = 3  # Final velocity
     ego_plan.guideangle = 0 # Final heading
-    ego_plan.timestamp = int(rospy.Time.now().to_sec())
+    # ego_plan.timestamp = int(rospy.Time.now().to_sec())
 
     # Decision-making (example behavior)
     ego_decision.drivebehavior = 2  # Drive behavior, this could be adjusted
