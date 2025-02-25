@@ -34,54 +34,54 @@ global bag_time
 bag_time = 0
 global bag_data
 # file_path = '/media/wanji/ssd2T/20250211-bag/2025-02-11-15-31-30.bag'
-file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
+# file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
 # 打开bag文件
-bag = rosbag.Bag(file_path, 'r')
+# bag = rosbag.Bag(file_path, 'r')
 
 guidespeed = []
 guideangle = []
 timestamp = []
 roadpints = []
 # 遍历bag文件中的每条消息
-for topic, msg, t in bag.read_messages(topics='/planningmotion'):
-    # 读取 /planningmotion 话题中的数据
-    guidespeed.append(msg.guidespeed)   
-    guideangle.append(msg.guideangle)  
-    timestamp.append(msg.timestamp)
-    # 解析 /planningmotion 中的每个 roadpoint
-    planning_points = []
-    for point in msg.points:
-        p = roadpoint()
-        p.x = point.x
-        p.y = point.y
-        p.speed = point.speed
-        p.heading = point.heading
-        # p.jerk = point.jerk
-        # p.lanewidth = point.lanewidth
-        p.s = point.s
-        p.gx = point.gx
-        p.gy = point.gy
-        p.roadtype = point.roadtype
-        p.a = point.a
-        p.lanetype = point.lanetype
-        p.turnlight = point.turnlight
-        # p.mergelanetype = point.mergelanetype
-        # p.sensorlanetype = point.sensorlanetype
-        p.curvature = point.curvature
-        p.relativetime = point.relativetime
-        # p.dkappa = point.dkappa
-        # p.ddkappa = point.ddkappa
-        # p.sideroadwidth = point.sideroadwidth
-        # p.leftlanewidth = point.leftlanewidth
-        # p.rightlanewidth = point.rightlanewidth
-        # p.laneswitch = point.laneswitch
-        # p.lanenum = point.lanenum
-        # p.lanesite = point.lanesite
-        planning_points.append(p)   
-    roadpints.append(planning_points)
+# for topic, msg, t in bag.read_messages(topics='/planningmotion'):
+#     # 读取 /planningmotion 话题中的数据
+#     guidespeed.append(msg.guidespeed)   
+#     guideangle.append(msg.guideangle)  
+#     timestamp.append(msg.timestamp)
+#     # 解析 /planningmotion 中的每个 roadpoint
+#     planning_points = []
+#     for point in msg.points:
+#         p = roadpoint()
+#         p.x = point.x
+#         p.y = point.y
+#         p.speed = point.speed
+#         p.heading = point.heading
+#         # p.jerk = point.jerk
+#         # p.lanewidth = point.lanewidth
+#         p.s = point.s
+#         p.gx = point.gx
+#         p.gy = point.gy
+#         p.roadtype = point.roadtype
+#         p.a = point.a
+#         p.lanetype = point.lanetype
+#         p.turnlight = point.turnlight
+#         # p.mergelanetype = point.mergelanetype
+#         # p.sensorlanetype = point.sensorlanetype
+#         p.curvature = point.curvature
+#         p.relativetime = point.relativetime
+#         # p.dkappa = point.dkappa
+#         # p.ddkappa = point.ddkappa
+#         # p.sideroadwidth = point.sideroadwidth
+#         # p.leftlanewidth = point.leftlanewidth
+#         # p.rightlanewidth = point.rightlanewidth
+#         # p.laneswitch = point.laneswitch
+#         # p.lanenum = point.lanenum
+#         # p.lanesite = point.lanesite
+#         planning_points.append(p)   
+#     roadpints.append(planning_points)
         
-    # 关闭bag文件
-bag.close()
+#     # 关闭bag文件
+# bag.close()
 
 bag_data = {
     "guidespeed": guidespeed, 
@@ -135,7 +135,7 @@ def callback_sensorgps(data):
     check_and_process_data()
 
 def callback_objectTrack(data):
-    update_frame_data("/objectTrack/track_results8CornerForRVIZ", data)
+    update_frame_data("/objectTrack/track_results", data)
     check_and_process_data()
 
 def callback_actuator(data):
@@ -217,7 +217,7 @@ def offline_test():
     global bag_data, frame_data, data_status
     
     # 打开bag文件
-    file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
+    file_path = '/media/wanji/ssd2T/20250211-bag/2025-02-11-15-31-30.bag'
     bag = rosbag.Bag(file_path, 'r')
     
     # 按时间戳组织数据
@@ -309,7 +309,7 @@ def main():
         pub_ego_decision = rospy.Publisher("/behaviordecision", decisionbehavior, queue_size=5)
         
         # 订阅传感器数据
-        rospy.Subscriber("/objectTrack/track_results8CornerForRVIZ", sensorobjects, callback_objectTrack, queue_size=3)
+        rospy.Subscriber("/objectTrack/track_results", sensorobjects, callback_objectTrack, queue_size=3)
         rospy.Subscriber("/actuator", actuator, callback_actuator, queue_size=3)
         rospy.Subscriber("/hdroutetoglobal", hdroutetoglobal, callback_hdroutetoglobal, queue_size=1)
         rospy.Subscriber("/sensorgps", sensorgps, callback_sensorgps, queue_size=3)

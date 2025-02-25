@@ -15,12 +15,37 @@ from common_msgs.msg import sensorobjects
 from common_msgs.msg import planningmotion
 from common_msgs.msg import decisionbehavior
 from pyproj import Proj, Transformer
+import math
 
 # 全局变量存储参考线信息
 ref_lons = []
 ref_lats = []
 ref_s = []
 vehicle_init_pos = None  # 存储车辆初始位置的全局变量
+
+def yaw_to_heading(yaw):
+    # yaw 转 heading
+    # 1. 先将yaw转换为以北为0的角度（逆时针为正）
+    north_angle = np.pi/2 - yaw
+    # 2. 转换为顺时针为正
+    heading = -north_angle
+    # 3. 归一化到0-2π范围
+    heading = heading % (2 * np.pi)
+    # 4. 转换为角度
+    heading_deg = math.degrees(heading)
+    return heading_deg
+
+def heading_to_yaw(heading_deg):
+    # heading 转 yaw
+    # 1. 转换为弧度
+    heading = math.radians(heading_deg)
+    # 2. 转换为逆时针为正
+    north_angle = -heading
+    # 3. 转换为以x轴为0的角度
+    yaw = np.pi/2 - north_angle
+    # 4. 归一化到-π到π范围
+    yaw = (yaw + np.pi) % (2 * np.pi) - np.pi
+    return yaw
 
 def init_reference_path(reference_data):
     """初始化参考线信息"""
@@ -29,10 +54,7 @@ def init_reference_path(reference_data):
     try:
         # 因为传入的是 ref_dict，所以需要先获取 hdroutetoglobal 数据
         hd_route = reference_data["hdroutetoglobal"]
-        
-        # 遍历 hdroutetoglobal.map (hdmap[] 数组)
         for hdmap_msg in hd_route.map:
-            # 遍历每个 hdmap 中的 point (mapformat[] 数组)
             for point in hdmap_msg.point:
                 ref_lons.append(point.lon)
                 ref_lats.append(point.lat)
@@ -89,7 +111,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     # v0 = sensorgps_data.velocity
     # heading = sensorgps_data.heading
     if not ref_lons and reference_data:
-        print("reference_data type:", type(reference_data))
+        # print("reference_data type:", type(reference_data))
         init_reference_path(reference_data)
 
     ego_state = Node(
@@ -136,12 +158,14 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     # Acceleration and time steps for the motion plan
     a = 2  # Constant acceleration
     # t_max = 3  # Total time for the trajectory
-    time_steps = 20  # Number of time steps to break down the trajectory
+    time_steps = 50  # Number of time steps to break down the trajectory
 
     # Generate the trajectory using the Node's kinematic update
     trajectory_points = []
     trajectory_points_x = []
     trajectory_points_y = []
+
+    ego_state.yaw = np.pi/2  # Convert to radians
     for t in range(time_steps):
         # Update the vehicle's state using the Node's update method
         # Create a roadpoint from the updated state
@@ -152,9 +176,9 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         point.gx, point.gy = xy_to_latlon(ego_state.gx,ego_state.gy,point.x/100,point.y/100)
 
         point.speed = 15 # ego_state.v / 100  # Updated velocity
-        point.heading = 0  # Updated heading
-        point.roadtype = 128
-        point.turnlight = 2
+        point.heading = 320  # Updated heading
+        point.roadtype = 2
+        point.turnlight = 0
         # print(f'heading is {point.heading}')
         point.a = a  
         point.jerk = 0  # Assuming no jerk (smooth motion)
@@ -228,12 +252,15 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
 
     # plt.plot(ego_plan.points.x, ego_plan.points.y, marker='o', label='Trajectory Points')
     # plt.savefig('trajectory_plot.png')
-    ego_plan.guidespeed = 3  # Final velocity
-    ego_plan.guideangle = 0 # Final heading
-    # ego_plan.timestamp = int(rospy.Time.now().to_sec())
+    ego_plan.guidespeed = 20  # Final velocity
+    ego_plan.guideangle = 320 # Final heading
+    ego_plan.timestamp = int(rospy.Time.now().to_sec()*1000)
 
     # Decision-making (example behavior)
-    ego_decision.drivebehavior = 2  # Drive behavior, this could be adjusted
+    ego_decision.drivebehavior = 1  # Drive behavior, this could be adjusted
+    ego_decision.guidespeed = 20
+    ego_decision.carworkstatus = 0
+    ego_decision.timestamp = int(rospy.Time.now().to_sec()*1000)
 
     # rospy.loginfo(f"Planning result: ego_plan={ego_plan}, ego_decision={ego_decision}")
 
@@ -252,7 +279,7 @@ def bag_plan(bag_data, t, ego_plan, ego_decision):
     # plt.savefig('trajectory_plot.png')
     ego_plan.guidespeed = bag_data['guidespeed'][t]  # Final velocity
     ego_plan.guideangle = bag_data['guideangle'][t]  # Final heading
-    ego_plan.timestamp = int(rospy.Time.now().to_sec())
+    ego_plan.timestamp = int(rospy.Time.now().to_sec()*1000)
 
     ego_decision.drivebehavior = 2  # Drive behavior, this could be adjusted
 
