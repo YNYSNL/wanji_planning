@@ -162,6 +162,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
 
     # Generate the trajectory using the Node's kinematic update
     trajectory_points = []
+    raw_trajectory_points = []
     trajectory_points_x = []
     trajectory_points_y = []
 
@@ -207,9 +208,61 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
 
         # xy_converter = xy_to_lon_lat([ego_state], [state_dict])te(100)
         # transformed_data = xy_converter.transform()
-        trajectory_points.append(point)
+        raw_trajectory_points.append(point)
         trajectory_points_x.append(point.x)
         trajectory_points_y.append(point.y)
+        for i in range(len(raw_trajectory_points)-1):
+            current_point = raw_trajectory_points[i]
+            next_point = raw_trajectory_points[i+1]
+            
+            # 计算两点之间的距离
+            dx = next_point.x - current_point.x
+            dy = next_point.y - current_point.y
+            distance = np.sqrt(dx**2 + dy**2)
+            
+            # 如果距离大于20cm，进行插值
+            if distance > 20:
+                # 计算需要插入的点数
+                num_points = int(np.ceil(distance/20))
+                
+                # 将当前点加入轨迹
+                trajectory_points.append(current_point)
+                
+                # 在两点之间插值
+                for j in range(1, num_points):
+                    ratio = j/num_points
+                    interpolated_point = roadpoint()
+                    
+                    # 线性插值x和y坐标
+                    interpolated_point.x = current_point.x + dx * ratio
+                    interpolated_point.y = current_point.y + dy * ratio
+                    
+                    # 计算插值点的经纬度
+                    interpolated_point.gx, interpolated_point.gy = xy_to_latlon(
+                        ego_state.gx, 
+                        ego_state.gy,
+                        interpolated_point.x/100,  # 转换为米
+                        interpolated_point.y/100   # 转换为米
+                    )
+                    
+                    # 复制其他属性
+                    interpolated_point.speed = current_point.speed
+                    interpolated_point.heading = current_point.heading
+                    interpolated_point.roadtype = current_point.roadtype
+                    interpolated_point.turnlight = current_point.turnlight
+                    interpolated_point.a = current_point.a
+                    interpolated_point.jerk = current_point.jerk
+                    interpolated_point.lanewidth = current_point.lanewidth
+                    
+                    ds = next_point.s - current_point.s
+                    interpolated_point.s = current_point.s + ds * ratio
+                    
+                    trajectory_points.append(interpolated_point)
+            else:
+                trajectory_points.append(current_point)
+        
+        # 添加最后一个点
+        trajectory_points.append(raw_trajectory_points[-1])
 
     # path_obj = get_path_obj(np.array(trajectory_points_x), np.array(trajectory_points_y))
 
@@ -224,15 +277,15 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
 
     # logging.info(f"trajectory_points_x: {trajectory_points_x}")
 
-    with open('trajectory_points.csv', mode='w', newline='') as file:
-        writer = csv.writer(file)
+    # with open('trajectory_points.csv', mode='w', newline='') as file:
+    #     writer = csv.writer(file)
         
-        # Write the header
-        writer.writerow(['x', 'y'])
+    #     # Write the header
+    #     writer.writerow(['x', 'y'])
         
-        # Write the data
-        for x, y in zip(trajectory_points_x, trajectory_points_y):
-            writer.writerow([x, y])
+    #     # Write the data
+    #     for x, y in zip(trajectory_points_x, trajectory_points_y):
+    #         writer.writerow([x, y])
 
     # # Plot the trajectory
     # plt.figure(figsize=(8, 6))
