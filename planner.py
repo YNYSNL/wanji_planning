@@ -164,103 +164,113 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         ref_points = np.column_stack((ref_lons, ref_lats))
         kdtree = cKDTree(ref_points)
 
-    # 使用numpy数组预分配内存，避免频繁append
-    raw_points_array = np.zeros((time_steps, 2))  # 存储x,y坐标
-
-    # Generate the trajectory using the Node's kinematic update
-    trajectory_points = []
-    raw_trajectory_points = []
-    trajectory_points_x = []
-    trajectory_points_y = []
 
     ego_state.yaw = np.pi/2  # Convert to radians
+    base_point = roadpoint()
+    base_point.speed = 15
+    base_point.heading = 320
+    base_point.roadtype = 2
+    base_point.turnlight = 0
+    base_point.a = a
+    base_point.jerk = 0
+    base_point.lanewidth = 0
+
+    # 批量计算所有轨迹点的位置
     t_array = np.arange(time_steps) * P.dt
-    v_array = ego_state.v + a * 100 * t_array
-    # 使用速度数组计算位移（梯形积分）
+    v_array = ego_state.v + a*100 * t_array
     dx = v_array * np.cos(ego_state.yaw) * P.dt
     dy = v_array * np.sin(ego_state.yaw) * P.dt
     
-    # 累积求和得到位置
     x_array = ego_state.x + np.cumsum(dx) * ego_state.direct
     y_array = ego_state.y + np.cumsum(dy) * ego_state.direct
-    for t, (x, y) in enumerate(zip(x_array, y_array)):
-        point = roadpoint()
-        point.x = x
-        point.y = y
-        point.gx, point.gy = xy_to_latlon(ego_state.gx, ego_state.gy, x/100, y/100)
+
+    # 批量创建轨迹点
+    raw_trajectory_points = []
+    if ref_lons:
+        # 批量转换所有点的经纬度
+        gx_array, gy_array = np.vectorize(xy_to_latlon)(
+            np.full_like(x_array, ego_state.gx),
+            np.full_like(y_array, ego_state.gy),
+            x_array/100, y_array/100)
         
-        # 基本属性设置
-        point.speed = 15
-        point.heading = 320
-        point.roadtype = 2
-        point.turnlight = 0
-        point.a = a
-        point.jerk = 0
-        point.lanewidth = 0
+        # 批量查找最近点
+        _, nearest_indices = kdtree.query(np.column_stack((gx_array, gy_array)))
+        
+        # 批量计算exact_dist
+        exact_dists = np.vectorize(calc_distance)(
+            gx_array, gy_array,
+            np.array(ref_lons)[nearest_indices],
+            np.array(ref_lats)[nearest_indices])
+        
+        s_values = np.array(ref_s)[nearest_indices] + exact_dists
+    else:
+        s_values = t_array * 0.1 * ego_state.v
+        gx_array, gy_array = np.vectorize(xy_to_latlon)(
+            np.full_like(x_array, ego_state.gx),
+            np.full_like(y_array, ego_state.gy),
+            x_array/100, y_array/100)
 
-        if ref_lons:
-            # 使用KD树快速查找最近点
-            _, nearest_idx = kdtree.query([point.gx, point.gy])
-            point.s = ref_s[nearest_idx]
-            
-            if nearest_idx > 0:
-                exact_dist = calc_distance(point.gx, point.gy, ref_lons[nearest_idx], ref_lats[nearest_idx])
-                point.s += exact_dist
-        else:
-            point.s = t * 0.1 * ego_state.v
+    # 使用列表推导式创建轨迹点
+    raw_trajectory_points = [
+        roadpoint(
+            x=x, y=y, gx=gx, gy=gy,
+            speed=base_point.speed,
+            heading=base_point.heading,
+            roadtype=base_point.roadtype,
+            turnlight=base_point.turnlight,
+            a=base_point.a,
+            jerk=base_point.jerk,
+            lanewidth=base_point.lanewidth,
+            s=s
+        ) for x, y, gx, gy, s in zip(x_array, y_array, gx_array, gy_array, s_values)
+    ]
 
-        raw_trajectory_points.append(point)
-
-    points_array = np.array([(p.x, p.y) for p in raw_trajectory_points])
-    
-    # 批量计算相邻点距离
+    # 优化插值过程
+    points_array = np.column_stack((x_array, y_array))
     diff = np.diff(points_array, axis=0)
     distances = np.sqrt(np.sum(diff**2, axis=1))
     
-    # 批量处理插值
-    for i, distance in enumerate(distances):
+    trajectory_points = []
+    i = 0
+    while i < len(raw_trajectory_points) - 1:
         current_point = raw_trajectory_points[i]
         trajectory_points.append(current_point)
         
-        if distance > 20:
+        if distances[i] > 20:
             next_point = raw_trajectory_points[i + 1]
-            num_points = int(np.ceil(distance/20))
+            num_points = int(np.ceil(distances[i]/20))
             
-            # 批量生成插值比例
+            # 一次性生成所有插值点
             ratios = np.linspace(1/num_points, 1-1/num_points, num_points-1)
+            x_interp = current_point.x + (next_point.x - current_point.x) * ratios
+            y_interp = current_point.y + (next_point.y - current_point.y) * ratios
             
-            # 批量计算插值点的x,y坐标
-            dx = next_point.x - current_point.x
-            dy = next_point.y - current_point.y
+            # 批量计算插值点的经纬度
+            gx_interp, gy_interp = np.vectorize(xy_to_latlon)(
+                np.full_like(ratios, ego_state.gx),
+                np.full_like(ratios, ego_state.gy),
+                x_interp/100, y_interp/100)
             
-            x_interp = current_point.x + dx * ratios
-            y_interp = current_point.y + dy * ratios
+            # 批量计算s值
+            s_interp = current_point.s + (next_point.s - current_point.s) * ratios
             
-            for j, (x, y) in enumerate(zip(x_interp, y_interp)):
-                interpolated_point = roadpoint()
-                interpolated_point.x = x
-                interpolated_point.y = y
-                
-                # 计算经纬度
-                interpolated_point.gx, interpolated_point.gy = xy_to_latlon(
-                    ego_state.gx, ego_state.gy, x/100, y/100)
-                
-                # 复制属性
-                interpolated_point.speed = current_point.speed
-                interpolated_point.heading = current_point.heading
-                interpolated_point.roadtype = current_point.roadtype
-                interpolated_point.turnlight = current_point.turnlight
-                interpolated_point.a = current_point.a
-                interpolated_point.jerk = current_point.jerk
-                interpolated_point.lanewidth = current_point.lanewidth
-                
-                # s坐标插值
-                ds = next_point.s - current_point.s
-                interpolated_point.s = current_point.s + ds * ratios[j]
-                
-                trajectory_points.append(interpolated_point)
+            # 批量创建插值点
+            interpolated_points = [
+                roadpoint(
+                    x=x, y=y, gx=gx, gy=gy,
+                    speed=current_point.speed,
+                    heading=current_point.heading,
+                    roadtype=current_point.roadtype,
+                    turnlight=current_point.turnlight,
+                    a=current_point.a,
+                    jerk=current_point.jerk,
+                    lanewidth=current_point.lanewidth,
+                    s=s
+                ) for x, y, gx, gy, s in zip(x_interp, y_interp, gx_interp, gy_interp, s_interp)
+            ]
+            trajectory_points.extend(interpolated_points)
+        i += 1
     
-    # 添加最后一个点
     trajectory_points.append(raw_trajectory_points[-1])
     # path_obj = get_path_obj(np.array(trajectory_points_x), np.array(trajectory_points_y))
 
@@ -335,3 +345,92 @@ def bag_plan(bag_data, t, ego_plan, ego_decision):
     ego_decision.drivebehavior = 2  # Drive behavior, this could be adjusted
 
     return ego_plan, ego_decision
+
+    # t_array = np.arange(time_steps) * P.dt
+    # v_array = ego_state.v + a * t_array
+    # # 使用速度数组计算位移（梯形积分）
+    # dx = v_array * np.cos(ego_state.yaw) * P.dt
+    # dy = v_array * np.sin(ego_state.yaw) * P.dt
+    
+    # # 累积求和得到位置
+    # x_array = ego_state.x + np.cumsum(dx) * ego_state.direct
+    # y_array = ego_state.y + np.cumsum(dy) * ego_state.direct
+    # for t, (x, y) in enumerate(zip(x_array, y_array)):
+    #     point = roadpoint()
+    #     point.x = x
+    #     point.y = y
+    #     point.gx, point.gy = xy_to_latlon(ego_state.gx, ego_state.gy, x/100, y/100)
+        
+    #     # 基本属性设置
+    #     point.speed = 15
+    #     point.heading = 320
+    #     point.roadtype = 2
+    #     point.turnlight = 0
+    #     point.a = a
+    #     point.jerk = 0
+    #     point.lanewidth = 0
+
+    #     if ref_lons:
+    #         # 使用KD树快速查找最近点
+    #         _, nearest_idx = kdtree.query([point.gx, point.gy])
+    #         point.s = ref_s[nearest_idx]
+            
+    #         if nearest_idx > 0:
+    #             exact_dist = calc_distance(point.gx, point.gy, ref_lons[nearest_idx], ref_lats[nearest_idx])
+    #             point.s += exact_dist
+    #     else:
+    #         point.s = t * 0.1 * ego_state.v
+
+    #     raw_trajectory_points.append(point)
+
+    # points_array = np.array([(p.x, p.y) for p in raw_trajectory_points])
+    
+    # # 批量计算相邻点距离
+    # diff = np.diff(points_array, axis=0)
+    # distances = np.sqrt(np.sum(diff**2, axis=1))
+    
+    # # 批量处理插值
+    # for i, distance in enumerate(distances):
+    #     current_point = raw_trajectory_points[i]
+    #     trajectory_points.append(current_point)
+        
+    #     if distance > 20:
+    #         next_point = raw_trajectory_points[i + 1]
+    #         num_points = int(np.ceil(distance/20))
+            
+    #         # 批量生成插值比例
+    #         ratios = np.linspace(1/num_points, 1-1/num_points, num_points-1)
+            
+    #         # 批量计算插值点的x,y坐标
+    #         dx = next_point.x - current_point.x
+    #         dy = next_point.y - current_point.y
+            
+    #         x_interp = current_point.x + dx * ratios
+    #         y_interp = current_point.y + dy * ratios
+            
+    #         for j, (x, y) in enumerate(zip(x_interp, y_interp)):
+    #             interpolated_point = roadpoint()
+    #             interpolated_point.x = x
+    #             interpolated_point.y = y
+                
+    #             # 计算经纬度
+    #             interpolated_point.gx, interpolated_point.gy = xy_to_latlon(
+    #                 ego_state.gx, ego_state.gy, x/100, y/100)
+                
+    #             # 复制属性
+    #             interpolated_point.speed = current_point.speed
+    #             interpolated_point.heading = current_point.heading
+    #             interpolated_point.roadtype = current_point.roadtype
+    #             interpolated_point.turnlight = current_point.turnlight
+    #             interpolated_point.a = current_point.a
+    #             interpolated_point.jerk = current_point.jerk
+    #             interpolated_point.lanewidth = current_point.lanewidth
+                
+    #             # s坐标插值
+    #             ds = next_point.s - current_point.s
+    #             interpolated_point.s = current_point.s + ds * ratios[j]
+                
+    #             trajectory_points.append(interpolated_point)
+    
+    # # 添加最后一个点
+    # trajectory_points.append(raw_trajectory_points[-1])
