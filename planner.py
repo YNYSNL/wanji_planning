@@ -253,32 +253,6 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         gx_array, gy_array = xy_to_latlon_batch(
             ego_state.gx, ego_state.gy,
             x_array/100, y_array/100)
-    # if ref_lons:
-    #     start_time1 = time.time()
-    #     # 批量转换所有点的经纬度
-    #     gx_array, gy_array = np.vectorize(xy_to_latlon)(
-    #         np.full_like(x_array, ego_state.gx),
-    #         np.full_like(y_array, ego_state.gy),
-    #         x_array/100, y_array/100)
-    #     end_time1 = time.time()
-    #     print(f"转换经纬度耗时：{end_time1 - start_time1} s")
-        
-    #     # 批量查找最近点
-    #     _, nearest_indices = kdtree.query(np.column_stack((gx_array, gy_array)))
-        
-    #     # 批量计算exact_dist
-    #     exact_dists = np.vectorize(calc_distance)(
-    #         gx_array, gy_array,
-    #         np.array(ref_lons)[nearest_indices],
-    #         np.array(ref_lats)[nearest_indices])
-        
-    #     s_values = np.array(ref_s)[nearest_indices] + exact_dists
-    # else:
-    #     s_values = t_array * 0.1 * ego_state.v
-    #     gx_array, gy_array = np.vectorize(xy_to_latlon)(
-    #         np.full_like(x_array, ego_state.gx),
-    #         np.full_like(y_array, ego_state.gy),
-    #         x_array/100, y_array/100)
 
     # 使用列表推导式创建轨迹点
     raw_trajectory_points = [
@@ -294,58 +268,146 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
             s=s
         ) for x, y, gx, gy, s in zip(x_array, y_array, gx_array, gy_array, s_values)
     ]
-
-    # 优化插值过程
     points_array = np.column_stack((x_array, y_array))
     diff = np.diff(points_array, axis=0)
     distances = np.sqrt(np.sum(diff**2, axis=1))
     
     trajectory_points = []
     i = 0
-    while i < len(raw_trajectory_points) - 1:
-        current_point = raw_trajectory_points[i]
-        trajectory_points.append(current_point)
-        start_time3 = time.time()
-        if distances[i] > 20:
-            next_point = raw_trajectory_points[i + 1]
-            num_points = int(np.ceil(distances[i]/20))
+    
+    # 预先计算所有需要插值的点的索引
+    interpolation_indices = np.where(distances > 20)[0]
+
+    start_time3 = time.time()
+    
+    if len(interpolation_indices) > 0:
+        # 预分配存储空间
+        all_x_interp = []
+        all_y_interp = []
+        all_ratios = []
+        total_points = 0
+        
+        # 一次性计算所有插值点的x,y坐标
+        for idx in interpolation_indices:
+            current_point = raw_trajectory_points[idx]
+            next_point = raw_trajectory_points[idx + 1]
+            num_points = int(np.ceil(distances[idx]/20))
             
-            # 一次性生成所有插值点
             ratios = np.linspace(1/num_points, 1-1/num_points, num_points-1)
             x_interp = current_point.x + (next_point.x - current_point.x) * ratios
             y_interp = current_point.y + (next_point.y - current_point.y) * ratios
-
-            # 批量计算插值点的经纬度
-            gx_interp, gy_interp = np.vectorize(xy_to_latlon)(
-                np.full_like(ratios, ego_state.gx),
-                np.full_like(ratios, ego_state.gy),
-                x_interp/100, y_interp/100)
-
-
             
-            # 批量计算s值
-            s_interp = current_point.s + (next_point.s - current_point.s) * ratios
+            all_x_interp.extend(x_interp)
+            all_y_interp.extend(y_interp)
+            all_ratios.extend(ratios)
+            total_points += len(ratios)
+        
+        # 将所有插值点转换为numpy数组
+        all_x_interp = np.array(all_x_interp)
+        all_y_interp = np.array(all_y_interp)
+        
+        # 一次性批量转换所有插值点的经纬度
+        gx_interp_all, gy_interp_all = xy_to_latlon_batch(
+            ego_state.gx, ego_state.gy,
+            all_x_interp/100, all_y_interp/100)
+        
+        # 创建基础点对象作为模板
+        base_point = roadpoint()
+        base_point.speed = raw_trajectory_points[0].speed
+        base_point.heading = raw_trajectory_points[0].heading
+        base_point.roadtype = raw_trajectory_points[0].roadtype
+        base_point.turnlight = raw_trajectory_points[0].turnlight
+        base_point.a = raw_trajectory_points[0].a
+        base_point.jerk = raw_trajectory_points[0].jerk
+        base_point.lanewidth = raw_trajectory_points[0].lanewidth
+        
+        # 重新组织插值点
+        point_idx = 0
+        for idx in interpolation_indices:
+            current_point = raw_trajectory_points[idx]
+            next_point = raw_trajectory_points[idx + 1]
+            num_points = int(np.ceil(distances[idx]/20)) - 1
             
-            # 批量创建插值点
-            interpolated_points = [
-                roadpoint(
-                    x=x, y=y, gx=gx, gy=gy,
-                    speed=current_point.speed,
-                    heading=current_point.heading,
-                    roadtype=current_point.roadtype,
-                    turnlight=current_point.turnlight,
-                    a=current_point.a,
-                    jerk=current_point.jerk,
-                    lanewidth=current_point.lanewidth,
-                    s=s
-                ) for x, y, gx, gy, s in zip(x_interp, y_interp, gx_interp, gy_interp, s_interp)
-            ]
-            trajectory_points.extend(interpolated_points)
-        end_time3 = time.time()
-        print(f"插值耗时：{end_time3 - start_time3} s")
-        i += 1
+            trajectory_points.append(current_point)
+            
+            # 批量创建这段的插值点
+            for j in range(num_points):
+                new_point = roadpoint()
+                new_point.x = all_x_interp[point_idx]
+                new_point.y = all_y_interp[point_idx]
+                new_point.gx = gx_interp_all[point_idx]
+                new_point.gy = gy_interp_all[point_idx]
+                new_point.speed = base_point.speed
+                new_point.heading = base_point.heading
+                new_point.roadtype = base_point.roadtype
+                new_point.turnlight = base_point.turnlight
+                new_point.a = base_point.a
+                new_point.jerk = base_point.jerk
+                new_point.lanewidth = base_point.lanewidth
+                new_point.s = current_point.s + (next_point.s - current_point.s) * (j+1)/(num_points+1)
+                
+                trajectory_points.append(new_point)
+                point_idx += 1
+            
+            if idx == interpolation_indices[-1]:
+                trajectory_points.append(next_point)
+    else:
+        # 如果没有需要插值的点，直接使用原始点
+        trajectory_points = raw_trajectory_points
+
+    end_time3 = time.time()
+    print(f"插值耗时：{end_time3 - start_time3} s")
+    # 优化插值过程
+    # points_array = np.column_stack((x_array, y_array))
+    # diff = np.diff(points_array, axis=0)
+    # distances = np.sqrt(np.sum(diff**2, axis=1))
     
-    trajectory_points.append(raw_trajectory_points[-1])
+    # trajectory_points = []
+    # i = 0
+    # while i < len(raw_trajectory_points) - 1:
+    #     current_point = raw_trajectory_points[i]
+    #     trajectory_points.append(current_point)
+    #     start_time3 = time.time()
+    #     if distances[i] > 20:
+    #         next_point = raw_trajectory_points[i + 1]
+    #         num_points = int(np.ceil(distances[i]/20))
+            
+    #         # 一次性生成所有插值点
+    #         ratios = np.linspace(1/num_points, 1-1/num_points, num_points-1)
+    #         x_interp = current_point.x + (next_point.x - current_point.x) * ratios
+    #         y_interp = current_point.y + (next_point.y - current_point.y) * ratios
+
+    #         # 批量计算插值点的经纬度
+    #         gx_interp, gy_interp = np.vectorize(xy_to_latlon)(
+    #             np.full_like(ratios, ego_state.gx),
+    #             np.full_like(ratios, ego_state.gy),
+    #             x_interp/100, y_interp/100)
+
+
+            
+    #         # 批量计算s值
+    #         s_interp = current_point.s + (next_point.s - current_point.s) * ratios
+            
+    #         # 批量创建插值点
+    #         interpolated_points = [
+    #             roadpoint(
+    #                 x=x, y=y, gx=gx, gy=gy,
+    #                 speed=current_point.speed,
+    #                 heading=current_point.heading,
+    #                 roadtype=current_point.roadtype,
+    #                 turnlight=current_point.turnlight,
+    #                 a=current_point.a,
+    #                 jerk=current_point.jerk,
+    #                 lanewidth=current_point.lanewidth,
+    #                 s=s
+    #             ) for x, y, gx, gy, s in zip(x_interp, y_interp, gx_interp, gy_interp, s_interp)
+    #         ]
+    #         trajectory_points.extend(interpolated_points)
+    #     end_time3 = time.time()
+    #     print(f"插值耗时：{end_time3 - start_time3} s")
+    #     i += 1
+    
+    # trajectory_points.append(raw_trajectory_points[-1])
     # path_obj = get_path_obj(np.array(trajectory_points_x), np.array(trajectory_points_y))
 
     # s_his = 0
