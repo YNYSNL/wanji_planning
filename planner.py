@@ -18,7 +18,42 @@ from pyproj import Proj, Transformer
 import math
 from scipy.spatial import cKDTree
 import time
+from functools import lru_cache
+import numba
 
+@lru_cache(maxsize=1)
+def get_transformer(lon_origin, lat_origin):
+    proj_string = f"+proj=tmerc +lon_0={lon_origin} +lat_0={lat_origin} +ellps=WGS84"
+    proj = Proj(proj_string)
+    return Transformer.from_crs(proj_string, "epsg:4326", always_xy=True), proj
+
+def xy_to_latlon_batch(lon_origin, lat_origin, x_array, y_array):
+    """批量转换坐标"""
+    transformer_inv, proj = get_transformer(lon_origin, lat_origin)
+    x0, y0 = proj(lon_origin, lat_origin)
+    
+    # 批量转换
+    lon_array, lat_array = transformer_inv.transform(
+        x_array + x0,
+        y_array + y0
+    )
+    return lon_array, lat_array
+
+# 优化距离计算
+@numba.jit(nopython=True)
+def calc_distance_batch(lon1_array, lat1_array, lon2_array, lat2_array):
+    """使用Numba加速批量计算距离"""
+    R = 6371000  # 地球半径(米)
+    phi1 = np.radians(lat1_array)
+    phi2 = np.radians(lat2_array)
+    delta_phi = np.radians(lat2_array - lat1_array)
+    delta_lambda = np.radians(lon2_array - lon1_array)
+    
+    a = np.sin(delta_phi/2)**2 + \
+        np.cos(phi1) * np.cos(phi2) * \
+        np.sin(delta_lambda/2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    return R * c
 # 全局变量存储参考线信息
 ref_lons = []
 ref_lats = []
@@ -188,32 +223,62 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
 
     # 批量创建轨迹点
     raw_trajectory_points = []
+    # 批量创建轨迹点
     if ref_lons:
         start_time1 = time.time()
         # 批量转换所有点的经纬度
-        gx_array, gy_array = np.vectorize(xy_to_latlon)(
-            np.full_like(x_array, ego_state.gx),
-            np.full_like(y_array, ego_state.gy),
+        gx_array, gy_array = xy_to_latlon_batch(
+            ego_state.gx, ego_state.gy,
             x_array/100, y_array/100)
         end_time1 = time.time()
         print(f"转换经纬度耗时：{end_time1 - start_time1} s")
-        
-        # 批量查找最近点
-        _, nearest_indices = kdtree.query(np.column_stack((gx_array, gy_array)))
-        
+        # 批量查找最近点 (使用更大的leaf_size可能会更快)
+        kdtree = cKDTree(np.column_stack((ref_lons, ref_lats)), leafsize=100)
+        _, nearest_indices = kdtree.query(
+            np.column_stack((gx_array, gy_array)),
+            workers=-1  # 使用多线程
+        )
+        start_time2 = time.time()
         # 批量计算exact_dist
-        exact_dists = np.vectorize(calc_distance)(
+        exact_dists = calc_distance_batch(
             gx_array, gy_array,
             np.array(ref_lons)[nearest_indices],
-            np.array(ref_lats)[nearest_indices])
-        
+            np.array(ref_lats)[nearest_indices]
+        )
+        end_time2 = time.time()
+        print(f"计算exact_dist耗时：{end_time2 - start_time2} s")
         s_values = np.array(ref_s)[nearest_indices] + exact_dists
     else:
         s_values = t_array * 0.1 * ego_state.v
-        gx_array, gy_array = np.vectorize(xy_to_latlon)(
-            np.full_like(x_array, ego_state.gx),
-            np.full_like(y_array, ego_state.gy),
+        gx_array, gy_array = xy_to_latlon_batch(
+            ego_state.gx, ego_state.gy,
             x_array/100, y_array/100)
+    # if ref_lons:
+    #     start_time1 = time.time()
+    #     # 批量转换所有点的经纬度
+    #     gx_array, gy_array = np.vectorize(xy_to_latlon)(
+    #         np.full_like(x_array, ego_state.gx),
+    #         np.full_like(y_array, ego_state.gy),
+    #         x_array/100, y_array/100)
+    #     end_time1 = time.time()
+    #     print(f"转换经纬度耗时：{end_time1 - start_time1} s")
+        
+    #     # 批量查找最近点
+    #     _, nearest_indices = kdtree.query(np.column_stack((gx_array, gy_array)))
+        
+    #     # 批量计算exact_dist
+    #     exact_dists = np.vectorize(calc_distance)(
+    #         gx_array, gy_array,
+    #         np.array(ref_lons)[nearest_indices],
+    #         np.array(ref_lats)[nearest_indices])
+        
+    #     s_values = np.array(ref_s)[nearest_indices] + exact_dists
+    # else:
+    #     s_values = t_array * 0.1 * ego_state.v
+    #     gx_array, gy_array = np.vectorize(xy_to_latlon)(
+    #         np.full_like(x_array, ego_state.gx),
+    #         np.full_like(y_array, ego_state.gy),
+    #         x_array/100, y_array/100)
 
     # 使用列表推导式创建轨迹点
     raw_trajectory_points = [
@@ -240,7 +305,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     while i < len(raw_trajectory_points) - 1:
         current_point = raw_trajectory_points[i]
         trajectory_points.append(current_point)
-        
+        start_time3 = time.time()
         if distances[i] > 20:
             next_point = raw_trajectory_points[i + 1]
             num_points = int(np.ceil(distances[i]/20))
@@ -249,14 +314,14 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
             ratios = np.linspace(1/num_points, 1-1/num_points, num_points-1)
             x_interp = current_point.x + (next_point.x - current_point.x) * ratios
             y_interp = current_point.y + (next_point.y - current_point.y) * ratios
-            start_time2 = time.time()
+
             # 批量计算插值点的经纬度
             gx_interp, gy_interp = np.vectorize(xy_to_latlon)(
                 np.full_like(ratios, ego_state.gx),
                 np.full_like(ratios, ego_state.gy),
                 x_interp/100, y_interp/100)
-            end_time2 = time.time()
-            print(f"插值转换经纬度耗时：{end_time2 - start_time2} s")
+
+
             
             # 批量计算s值
             s_interp = current_point.s + (next_point.s - current_point.s) * ratios
@@ -276,6 +341,8 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
                 ) for x, y, gx, gy, s in zip(x_interp, y_interp, gx_interp, gy_interp, s_interp)
             ]
             trajectory_points.extend(interpolated_points)
+        end_time3 = time.time()
+        print(f"插值耗时：{end_time3 - start_time3} s")
         i += 1
     
     trajectory_points.append(raw_trajectory_points[-1])
