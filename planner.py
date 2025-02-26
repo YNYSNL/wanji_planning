@@ -175,7 +175,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
 
     ego_state.yaw = np.pi/2  # Convert to radians
     t_array = np.arange(time_steps) * P.dt
-    v_array = ego_state.v + a * t_array
+    v_array = ego_state.v + a * 100 * t_array
     # 使用速度数组计算位移（梯形积分）
     dx = v_array * np.cos(ego_state.yaw) * P.dt
     dy = v_array * np.sin(ego_state.yaw) * P.dt
@@ -210,102 +210,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
             point.s = t * 0.1 * ego_state.v
 
         raw_trajectory_points.append(point)
-    # for t in range(time_steps):
-    #     # Update the vehicle's state using the Node's update method
-    #     # Create a roadpoint from the updated state
-    #     point = roadpoint()
-    #     point.x = ego_state.x  # Updated x-coordinate
-    #     point.y = ego_state.y  # Updated y-coordinate    relativetime: 0.0
-    #     # print('gx',ego_state.gx,'gy',ego_state.gy)
-    #     point.gx, point.gy = xy_to_latlon(ego_state.gx,ego_state.gy,point.x/100,point.y/100)
 
-    #     point.speed = 15 # ego_state.v / 100  # Updated velocity
-    #     point.heading = 320  # Updated heading
-    #     point.roadtype = 2
-    #     point.turnlight = 0
-    #     # print(f'heading is {point.heading}')
-    #     point.a = a  
-    #     point.jerk = 0  # Assuming no jerk (smooth motion)
-    #     point.lanewidth = 0  # Default lane width, adjust if needed
-    #     ego_state.update(200, delta=0.0, direct=1.0)  # Assume no steering (delta=0) for simplicity
-
-    #     if ref_lons:
-    #         distances = []
-    #         for i in range(len(ref_lons)):
-    #             dist = calc_distance(point.gx, point.gy, ref_lons[i], ref_lats[i])
-    #             distances.append(dist)
-            
-    #         nearest_idx = np.argmin(distances)
-    #         # 使用重新计算的ref_s
-    #         point.s = ref_s[nearest_idx]
-            
-    #         # 如果需要，可以加入到当前位置的精确距离修正
-    #         if nearest_idx > 0:
-    #             # 计算到最近点的精确距离
-    #             exact_dist = calc_distance(point.gx, point.gy, ref_lons[nearest_idx], ref_lats[nearest_idx])
-    #             # 根据车辆位置在参考线左右侧决定距离正负
-    #             # 这里需要根据实际情况补充判断逻辑
-    #             point.s += exact_dist
-    #     else:
-    #         point.s = t * 0.1 * ego_state.v
-
-        # xy_converter = xy_to_lon_lat([ego_state], [state_dict])te(100)
-        # transformed_data = xy_converter.transform()
-        # raw_trajectory_points.append(point)
-        # trajectory_points_x.append(point.x)
-        # trajectory_points_y.append(point.y)
-        # for i in range(len(raw_trajectory_points)-1):
-        #     current_point = raw_trajectory_points[i]
-        #     next_point = raw_trajectory_points[i+1]
-            
-        #     # 计算两点之间的距离
-        #     dx = next_point.x - current_point.x
-        #     dy = next_point.y - current_point.y
-        #     distance = np.sqrt(dx**2 + dy**2)
-            
-        #     # 如果距离大于20cm，进行插值
-        #     if distance > 20:
-        #         # 计算需要插入的点数
-        #         num_points = int(np.ceil(distance/20))
-                
-        #         # 将当前点加入轨迹
-        #         trajectory_points.append(current_point)
-                
-        #         # 在两点之间插值
-        #         for j in range(1, num_points):
-        #             ratio = j/num_points
-        #             interpolated_point = roadpoint()
-                    
-        #             # 线性插值x和y坐标
-        #             interpolated_point.x = current_point.x + dx * ratio
-        #             interpolated_point.y = current_point.y + dy * ratio
-                    
-        #             # 计算插值点的经纬度
-        #             interpolated_point.gx, interpolated_point.gy = xy_to_latlon(
-        #                 ego_state.gx, 
-        #                 ego_state.gy,
-        #                 interpolated_point.x/100,  # 转换为米
-        #                 interpolated_point.y/100   # 转换为米
-        #             )
-                    
-        #             # 复制其他属性
-        #             interpolated_point.speed = current_point.speed
-        #             interpolated_point.heading = current_point.heading
-        #             interpolated_point.roadtype = current_point.roadtype
-        #             interpolated_point.turnlight = current_point.turnlight
-        #             interpolated_point.a = current_point.a
-        #             interpolated_point.jerk = current_point.jerk
-        #             interpolated_point.lanewidth = current_point.lanewidth
-                    
-        #             ds = next_point.s - current_point.s
-        #             interpolated_point.s = current_point.s + ds * ratio
-                    
-        #             trajectory_points.append(interpolated_point)
-        #     else:
-        #         trajectory_points.append(current_point)
-        
-        # # 添加最后一个点
-        # trajectory_points.append(raw_trajectory_points[-1])
     points_array = np.array([(p.x, p.y) for p in raw_trajectory_points])
     
     # 批量计算相邻点距离
