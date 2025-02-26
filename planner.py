@@ -17,6 +17,8 @@ from common_msgs.msg import decisionbehavior
 from pyproj import Proj, Transformer
 import math
 from scipy.spatial import cKDTree
+import time
+
 # 全局变量存储参考线信息
 ref_lons = []
 ref_lats = []
@@ -187,11 +189,14 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     # 批量创建轨迹点
     raw_trajectory_points = []
     if ref_lons:
+        start_time1 = time.time()
         # 批量转换所有点的经纬度
         gx_array, gy_array = np.vectorize(xy_to_latlon)(
             np.full_like(x_array, ego_state.gx),
             np.full_like(y_array, ego_state.gy),
             x_array/100, y_array/100)
+        end_time1 = time.time()
+        print(f"转换经纬度耗时：{end_time1 - start_time1} s")
         
         # 批量查找最近点
         _, nearest_indices = kdtree.query(np.column_stack((gx_array, gy_array)))
@@ -244,12 +249,14 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
             ratios = np.linspace(1/num_points, 1-1/num_points, num_points-1)
             x_interp = current_point.x + (next_point.x - current_point.x) * ratios
             y_interp = current_point.y + (next_point.y - current_point.y) * ratios
-            
+            start_time2 = time.time()
             # 批量计算插值点的经纬度
             gx_interp, gy_interp = np.vectorize(xy_to_latlon)(
                 np.full_like(ratios, ego_state.gx),
                 np.full_like(ratios, ego_state.gy),
                 x_interp/100, y_interp/100)
+            end_time2 = time.time()
+            print(f"插值转换经纬度耗时：{end_time2 - start_time2} s")
             
             # 批量计算s值
             s_interp = current_point.s + (next_point.s - current_point.s) * ratios

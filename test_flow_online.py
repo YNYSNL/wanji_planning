@@ -23,6 +23,7 @@ import logging
 from planner import CACS_plan, bag_plan
 import os
 import json
+import time
 
 logging.basicConfig(filename='test_flow_online.log', level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 global pub_ego_plan
@@ -193,10 +194,14 @@ def check_and_process_data():
             "hdroutetoglobal": frame_data["hdroutetoglobal"]
         }
 
-
+        start_time = time.time()
 
         # 进行规划
         ego_plan, ego_decision = cal_action(state_dict, ref_dict)
+
+        end_time = time.time()
+        execution_time = end_time - start_time
+        rospy.loginfo(f"Planning and decision execution time: {execution_time:.2f}s")
 
         # 发布规划结果
         pub_ego_plan.publish(ego_plan)
@@ -212,6 +217,8 @@ def reset_data_status():
     for key in data_status:
         data_status[key] = False
         data_status["hdroutetoglobal"] = True
+        data_status["objectTrack"] = True
+        data_status["actuator"] = True
 def offline_test():
     """离线测试模式"""
     global bag_data, frame_data, data_status
