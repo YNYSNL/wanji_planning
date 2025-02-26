@@ -181,8 +181,8 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     dy = v_array * np.sin(ego_state.yaw) * P.dt
     
     # 累积求和得到位置
-    x_array = ego_state.x + np.cumsum(dx) * P.direct
-    y_array = ego_state.y + np.cumsum(dy) * P.direct
+    x_array = ego_state.x + np.cumsum(dx) * ego_state.direct
+    y_array = ego_state.y + np.cumsum(dy) * ego_state.direct
     for t, (x, y) in enumerate(zip(x_array, y_array)):
         point = roadpoint()
         point.x = x
