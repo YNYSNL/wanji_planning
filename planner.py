@@ -60,6 +60,45 @@ ref_lats = []
 ref_s = []
 vehicle_init_pos = None  # 存储车辆初始位置的全局变量
 
+def coordinate_transform(x, y, yaw, target_heading=320):
+    """
+    将坐标系进行旋转变换
+    Args:
+        x: 原始x坐标数组
+        y: 原始y坐标数组
+        yaw: 原始偏航角数组（弧度）
+        target_heading: 目标航向角（度）
+    Returns:
+        new_x: 变换后的x坐标数组
+        new_y: 变换后的y坐标数组
+        new_heading: 变换后的航向角数组（度）
+    """
+    # 将目标航向角转换为弧度
+    theta = np.radians(target_heading)
+    
+    # 创建旋转矩阵
+    rotation_matrix = np.array([
+        [np.cos(theta), -np.sin(theta)],
+        [np.sin(theta), np.cos(theta)]
+    ])
+    
+    # 确保输入是numpy数组
+    x = np.asarray(x)
+    y = np.asarray(y)
+    yaw = np.asarray(yaw)
+    
+    # 进行坐标变换
+    points = np.column_stack((x - x[0], y - y[0]))
+    rotated_points = np.dot(points, rotation_matrix.T)
+    new_x = rotated_points[:, 0] + x[0]
+    new_y = rotated_points[:, 1] + y[0]
+    
+    # 计算新的航向角数组（原始偏航角数组加上旋转角度）
+    yaw_deg = np.degrees(yaw)
+    new_heading = (yaw_deg + target_heading) % 360
+    
+    return new_x, new_y, new_heading
+
 def yaw_to_heading(yaw):
     # yaw 转 heading
     # 1. 先将yaw转换为以北为0的角度（逆时针为正）
@@ -194,15 +233,32 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
           
     # Acceleration and time steps for the motion plan
     a = 2  # Constant acceleration
+    delta = 0
     # t_max = 3  # Total time for the trajectory
     time_steps = 50  # Number of time steps to break down the trajectory
+    x_array = np.zeros(time_steps)
+    y_array = np.zeros(time_steps)
+    yaw_array = np.zeros(time_steps)
+    v_array = np.zeros(time_steps)
+
+    x_array[0] = ego_state.x
+    y_array[0] = ego_state.y
+    yaw_array[0] = np.pi/2
+    v_array[0] = ego_state.v
+
+    for i in range(1,time_steps):
+        ego_state.update(a, delta, 1.0)
+        # 存储每个时间步的状态
+        x_array[i] = ego_state.x
+        y_array[i] = ego_state.y
+        yaw_array[i] = ego_state.yaw
+        v_array[i] = ego_state.v
+
     # 预先创建KD树用于快速查找最近点
     if ref_lons and ref_lats:
         ref_points = np.column_stack((ref_lons, ref_lats))
         kdtree = cKDTree(ref_points)
 
-
-    ego_state.yaw = np.pi/2  # Convert to radians
     base_point = roadpoint()
     base_point.speed = 15
     base_point.heading = 320
@@ -212,14 +268,9 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     base_point.jerk = 0
     base_point.lanewidth = 0
 
-    # 批量计算所有轨迹点的位置
-    t_array = np.arange(time_steps) * P.dt
-    v_array = ego_state.v + a*100 * t_array
-    dx = v_array * np.cos(ego_state.yaw) * P.dt
-    dy = v_array * np.sin(ego_state.yaw) * P.dt
-    
-    x_array = ego_state.x + np.cumsum(dx) * ego_state.direct
-    y_array = ego_state.y + np.cumsum(dy) * ego_state.direct
+
+    x_array, y_array, yaw_array = coordinate_transform(x_array, y_array, yaw_array)
+
 
     # 批量创建轨迹点
     raw_trajectory_points = []
@@ -248,33 +299,32 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         end_time2 = time.time()
         print(f"计算exact_dist耗时：{end_time2 - start_time2} s")
         s_values = np.array(ref_s)[nearest_indices] + exact_dists
-    else:
-        s_values = t_array * 0.1 * ego_state.v
-        gx_array, gy_array = xy_to_latlon_batch(
-            ego_state.gx, ego_state.gy,
-            x_array/100, y_array/100)
+    # else:
+    #     s_values = t_array * 0.1 * ego_state.v
+    #     gx_array, gy_array = xy_to_latlon_batch(
+    #         ego_state.gx, ego_state.gy,
+    #         x_array/100, y_array/100)
 
     # 使用列表推导式创建轨迹点
     raw_trajectory_points = [
         roadpoint(
             x=x, y=y, gx=gx, gy=gy,
             speed=base_point.speed,
-            heading=base_point.heading,
+            heading=yaw,
             roadtype=base_point.roadtype,
             turnlight=base_point.turnlight,
             a=base_point.a,
             jerk=base_point.jerk,
             lanewidth=base_point.lanewidth,
             s=s
-        ) for x, y, gx, gy, s in zip(x_array, y_array, gx_array, gy_array, s_values)
+        ) for x, y, gx, gy, s, yaw in zip(x_array, y_array, gx_array, gy_array, s_values, yaw_array)
     ]
     points_array = np.column_stack((x_array, y_array))
     diff = np.diff(points_array, axis=0)
     distances = np.sqrt(np.sum(diff**2, axis=1))
     
     trajectory_points = []
-    i = 0
-    
+   
     # 预先计算所有需要插值的点的索引
     interpolation_indices = np.where(distances > 20)[0]
 
@@ -314,7 +364,6 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         # 创建基础点对象作为模板
         base_point = roadpoint()
         base_point.speed = raw_trajectory_points[0].speed
-        base_point.heading = raw_trajectory_points[0].heading
         base_point.roadtype = raw_trajectory_points[0].roadtype
         base_point.turnlight = raw_trajectory_points[0].turnlight
         base_point.a = raw_trajectory_points[0].a
@@ -329,7 +378,9 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
             num_points = int(np.ceil(distances[idx]/20)) - 1
             
             trajectory_points.append(current_point)
-            
+            ratios = np.linspace(1/num_points, 1-1/num_points, num_points)
+            heading_interp = current_point.heading + \
+                           (next_point.heading - current_point.heading) * ratios        
             # 批量创建这段的插值点
             for j in range(num_points):
                 new_point = roadpoint()
@@ -338,7 +389,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
                 new_point.gx = gx_interp_all[point_idx]
                 new_point.gy = gy_interp_all[point_idx]
                 new_point.speed = base_point.speed
-                new_point.heading = base_point.heading
+                new_point.heading = heading_interp[j]
                 new_point.roadtype = base_point.roadtype
                 new_point.turnlight = base_point.turnlight
                 new_point.a = base_point.a
