@@ -78,8 +78,8 @@ def coordinate_transform(x, y, target_heading=320):
     
     # 创建旋转矩阵
     rotation_matrix = np.array([
-        [np.sin(theta), np.cos(theta)],
-        [np.cos(theta), -np.sin(theta)]
+        [np.cos(theta), np.sin(theta)],
+        [-np.sin(theta), np.cos(theta)]
     ])
     
     # 确保输入是numpy数组
@@ -189,7 +189,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     ego_state = Node(
         x=DataFromEgo['0'].get("x", 0.0) * 100, 
         y=DataFromEgo['0'].get("y", 0.0) * 100, 
-        yaw=0, 
+        yaw=np.pi/2, 
         v=DataFromEgo['0'].get("v", 0.0) * 100, 
         gx=DataFromEgo['0'].get("gx", 0.0), 
         gy=DataFromEgo['0'].get("gy", 0.0), 
@@ -267,6 +267,16 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
 
     x_array_global, y_array_global= coordinate_transform(x_array, y_array, target_heading=ego_state.heading)
 
+    # 计算相对于车辆位置的局部坐标
+    # dx_array = x_array - ego_state.x  # 相对于车辆位置的x偏移
+    # dy_array = y_array - ego_state.y  # 相对于车辆位置的y偏移
+    
+    # # 使用相对坐标进行转换
+    # x_array_global, y_array_global = coordinate_transform(dx_array, dy_array, target_heading=ego_state.heading)
+    
+    # # 转换回全局坐标
+    # x_array_global += ego_state.x
+    # y_array_global += ego_state.y
 
     # 批量创建轨迹点
     raw_trajectory_points = []
@@ -301,10 +311,8 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     #         ego_state.gx, ego_state.gy,
     #         x_array/100, y_array/100)
 
-    # 使用列表推导式创建轨迹点
     yaw_deg_local = np.degrees(yaw_array)
-    heading_glob = ego_state.heading - yaw_deg_local  # 一种典型的符号关系
-    # 保持结果在 0~360 范围内(可选)
+    heading_glob = ego_state.heading - yaw_deg_local + 90
     heading_glob = (heading_glob + 360) % 360
     raw_trajectory_points = [
         roadpoint(
@@ -357,7 +365,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         all_x_interp = np.array(all_x_interp)
         all_y_interp = np.array(all_y_interp)
 
-        all_x_interp_global, all_y_interp_global, _ = coordinate_transform(all_x_interp, all_y_interp, 0, target_heading=ego_state.heading)
+        all_x_interp_global, all_y_interp_global= coordinate_transform(all_x_interp, all_y_interp, target_heading=ego_state.heading)
         
         # 一次性批量转换所有插值点的经纬度
         gx_interp_all, gy_interp_all = xy_to_latlon_batch(
