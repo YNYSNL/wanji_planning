@@ -383,36 +383,45 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
         
         # 重新组织插值点
         point_idx = 0
-        for idx in interpolation_indices:
-            current_point = raw_trajectory_points[idx]
-            next_point = raw_trajectory_points[idx + 1]
-            num_points = int(np.ceil(distances[idx]/20)) - 1
+        for i in range(len(raw_trajectory_points) - 1):
+            current_point = raw_trajectory_points[i]
+            next_point = raw_trajectory_points[i + 1]
+            
+            # 计算当前点和下一点之间的距离
+            distance = np.sqrt((next_point.x - current_point.x)**2 + 
+                             (next_point.y - current_point.y)**2)
             
             trajectory_points.append(current_point)
-            ratios = np.linspace(1/num_points, 1-1/num_points, num_points)
-            heading_interp = current_point.heading + \
-                           (next_point.heading - current_point.heading) * ratios        
-            # 批量创建这段的插值点
-            for j in range(num_points):
-                new_point = roadpoint()
-                new_point.x = all_x_interp[point_idx]
-                new_point.y = all_y_interp[point_idx]
-                new_point.gx = gx_interp_all[point_idx]
-                new_point.gy = gy_interp_all[point_idx]
-                new_point.speed = base_point.speed
-                new_point.heading = heading_interp[j]
-                new_point.roadtype = base_point.roadtype
-                new_point.turnlight = base_point.turnlight
-                new_point.a = base_point.a
-                new_point.jerk = base_point.jerk
-                new_point.lanewidth = base_point.lanewidth
-                new_point.s = current_point.s + (next_point.s - current_point.s) * (j+1)/(num_points+1)
-                
-                trajectory_points.append(new_point)
-                point_idx += 1
             
-            if idx == interpolation_indices[-1]:
-                trajectory_points.append(next_point)
+            # 只有当距离大于20时才进行插值
+            if distance > 20:
+                num_points = int(np.ceil(distance/20)) - 1
+                ratios = np.linspace(1/num_points, 1-1/num_points, num_points)
+                heading_interp = current_point.heading + \
+                               (next_point.heading - current_point.heading) * ratios
+                
+                # 批量创建这段的插值点
+                for j in range(num_points):
+                    new_point = roadpoint()
+                    new_point.x = all_x_interp[point_idx]
+                    new_point.y = all_y_interp[point_idx]
+                    new_point.gx = gx_interp_all[point_idx]
+                    new_point.gy = gy_interp_all[point_idx]
+                    new_point.speed = base_point.speed
+                    new_point.heading = heading_interp[j]
+                    new_point.roadtype = base_point.roadtype
+                    new_point.turnlight = base_point.turnlight
+                    new_point.a = base_point.a
+                    new_point.jerk = base_point.jerk
+                    new_point.lanewidth = base_point.lanewidth
+                    new_point.s = current_point.s + (next_point.s - current_point.s) * (j+1)/(num_points+1)
+                    
+                    trajectory_points.append(new_point)
+                    point_idx += 1
+        
+        # 添加最后一个点
+        trajectory_points.append(raw_trajectory_points[-1])
+
     else:
         # 如果没有需要插值的点，直接使用原始点
         trajectory_points = raw_trajectory_points
