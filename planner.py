@@ -60,7 +60,7 @@ ref_lats = []
 ref_s = []
 vehicle_init_pos = None  # 存储车辆初始位置的全局变量
 
-def coordinate_transform(x, y, yaw, target_heading=320):
+def coordinate_transform(x, y, target_heading=320):
     """
     将坐标系进行旋转变换
     Args:
@@ -78,26 +78,22 @@ def coordinate_transform(x, y, yaw, target_heading=320):
     
     # 创建旋转矩阵
     rotation_matrix = np.array([
-        [np.cos(theta), -np.sin(theta)],
-        [np.sin(theta), np.cos(theta)]
+        [np.sin(theta), np.cos(theta)],
+        [np.cos(theta), -np.sin(theta)]
     ])
     
     # 确保输入是numpy数组
     x = np.asarray(x)
     y = np.asarray(y)
-    yaw = np.asarray(yaw)
     
     # 进行坐标变换
     points = np.column_stack((x - x[0], y - y[0]))
     rotated_points = np.dot(points, rotation_matrix.T)
     new_x = rotated_points[:, 0] + x[0]
     new_y = rotated_points[:, 1] + y[0]
+
     
-    # 计算新的航向角数组（原始偏航角数组加上旋转角度）
-    yaw_deg = np.degrees(yaw)
-    new_heading = (yaw_deg + target_heading) % 360
-    
-    return new_x, new_y, new_heading
+    return new_x, new_y
 
 def yaw_to_heading(yaw):
     # yaw 转 heading
@@ -193,7 +189,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     ego_state = Node(
         x=DataFromEgo['0'].get("x", 0.0) * 100, 
         y=DataFromEgo['0'].get("y", 0.0) * 100, 
-        yaw=np.pi/2, 
+        yaw=0, 
         v=DataFromEgo['0'].get("v", 0.0) * 100, 
         gx=DataFromEgo['0'].get("gx", 0.0), 
         gy=DataFromEgo['0'].get("gy", 0.0), 
@@ -269,7 +265,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     base_point.lanewidth = 0
 
 
-    x_array_global, y_array_global, yaw_array_global = coordinate_transform(x_array, y_array, yaw_array, target_heading=ego_state.heading)
+    x_array_global, y_array_global= coordinate_transform(x_array, y_array, target_heading=ego_state.heading)
 
 
     # 批量创建轨迹点
@@ -306,6 +302,10 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     #         x_array/100, y_array/100)
 
     # 使用列表推导式创建轨迹点
+    yaw_deg_local = np.degrees(yaw_array)
+    heading_glob = ego_state.heading - yaw_deg_local  # 一种典型的符号关系
+    # 保持结果在 0~360 范围内(可选)
+    heading_glob = (heading_glob + 360) % 360
     raw_trajectory_points = [
         roadpoint(
             x=x, y=y, gx=gx, gy=gy,
@@ -317,7 +317,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
             jerk=base_point.jerk,
             lanewidth=base_point.lanewidth,
             s=s
-        ) for x, y, gx, gy, s, yaw in zip(x_array, y_array, gx_array, gy_array, s_values, yaw_array_global)
+        ) for x, y, gx, gy, s, yaw in zip(x_array, y_array, gx_array, gy_array, s_values, heading_glob)
     ]
     points_array = np.column_stack((x_array, y_array))
     diff = np.diff(points_array, axis=0)
