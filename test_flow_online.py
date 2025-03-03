@@ -18,7 +18,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cvxpy
 from MotionPlanning.Control.MPC_XY_Frame import P, Node
-from transform import lon_lat_to_xy, xy_to_lon_lat, lon_lat_to_xy_map
+from transform import lon_lat_to_xy, xy_to_lon_lat
 import logging
 from planner import CACS_plan, bag_plan
 import os

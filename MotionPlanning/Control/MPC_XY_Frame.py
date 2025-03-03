@@ -86,7 +86,7 @@ class P:
 
 
 class Node:
-    def __init__(self, x=0.0, y=0.0, yaw=0.0, v=0.0, direct=1.0, gx=0, gy=0):
+    def __init__(self, x=0.0, y=0.0, yaw=0.0, v=0.0, direct=1.0, gx=0, gy=0, heading=0.0):
         self.x = x
         self.y = y
         self.yaw = yaw
@@ -94,6 +94,7 @@ class Node:
         self.direct = direct
         self.gx = gx
         self.gy = gy
+        self.heading = heading
 
     def update(self, a, delta, direct):
         delta = self.limit_input_delta(delta)
