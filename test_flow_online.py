@@ -91,8 +91,6 @@ bag_data = {
     "roadpoints": roadpints    
 }
 
-
-
 # 缓存每帧数据
 frame_data = {
     "sensorgps": None,
@@ -113,55 +111,18 @@ def update_frame_data(topic, msg):
     if topic == "/sensorgps":
         frame_data["sensorgps"] = msg
         data_status["sensorgps"] = True
-        print("sensorgps received!")  # 使用普通的print替代rospy.loginfo
+        rospy.loginfo("sensorgps received!")  # 使用普通的print替代rospy.loginfo
         
     elif topic == "/objectTrack/track_results":
         frame_data["objectTrack"] = msg
         data_status["objectTrack"] = True
-        print("objectTrack received!")
+        rospy.loginfo("objectTrack received!")
         
     elif topic == "/actuator":
         frame_data["actuator"] = msg
         data_status["actuator"] = True
+        rospy.loginfo("actuator received!")
         
-    elif topic == "/hdroutetoglobal":
-        frame_data["hdroutetoglobal"] = msg
-        data_status["hdroutetoglobal"] = True
-        print("hdroutetoglobal received!")
-
-# 回调函数
-def callback_sensorgps(data):
-
-    update_frame_data("/sensorgps", data)
-    check_and_process_data()
-
-def callback_objectTrack(data):
-    update_frame_data("/objectTrack/track_results", data)
-    check_and_process_data()
-
-def callback_actuator(data):
-    update_frame_data("/actuator", data)
-    check_and_process_data()
-
-# def callback_hdroutetoglobal(data):
-#     global reference_line_received
-#     # print(data)
-#     if not reference_line_received:
-#         reference_line_received = True
-#         update_frame_data("/hdroutetoglobal", data)
-#         check_and_process_data()
-
-def callback_hdroutetoglobal(data):
-    """处理参考线数据"""
-    if not frame_data.get("hdroutetoglobal"):
-        # 第一次收到参考线数据时初始化
-        frame_data["hdroutetoglobal"] = data
-        reference_data = {"hdroutetoglobal": data}
-        from planner import init_reference_path
-        init_reference_path(reference_data)
-    
-    update_frame_data("/hdroutetoglobal", data)
-    check_and_process_data()
 # 规划动作
 def cal_action(sensor_data, reference_data):
     ego_plan = planningmotion()
@@ -177,12 +138,19 @@ def cal_action(sensor_data, reference_data):
     # bag_time += 1
 
     return ego_plan, ego_decision
+
+# 重置数据状态标志
+def reset_data_status():
+    global data_status
+    for key in data_status:
+        data_status[key] = False
+        data_status["hdroutetoglobal"] = True
+
 # 检查数据是否齐全，且仅在数据齐全时处理
 def check_and_process_data():
-    if all(data_status.values()):
-        rospy.loginfo("All data received, processing planning...")
-        
 
+    if all(data_status.values()):
+        rospy.loginfo("All data received, processing planning...")     
         # 经纬度转为笛卡尔坐标
         lon_lat_converter_state = lon_lat_to_xy([frame_data["sensorgps"]])
         state_dict = lon_lat_converter_state.get_pos()
@@ -210,15 +178,32 @@ def check_and_process_data():
 
         # 重置数据状态标志
         reset_data_status()
+# 回调函数
+def callback_sensorgps(data):
+    update_frame_data("/sensorgps", data)
+    check_and_process_data()
 
-# 重置数据状态标志
-def reset_data_status():
-    global data_status
-    for key in data_status:
-        data_status[key] = False
+def callback_objectTrack(data):
+    update_frame_data("/objectTrack/track_results", data)
+    check_and_process_data()
+
+def callback_actuator(data):
+    update_frame_data("/actuator", data)
+    check_and_process_data()
+
+def callback_hdroutetoglobal(data):
+    """处理参考线数据"""
+    if not frame_data.get("hdroutetoglobal"):
+        # 第一次收到参考线数据时初始化
+        frame_data["hdroutetoglobal"] = data
         data_status["hdroutetoglobal"] = True
-        data_status["objectTrack"] = True
-        data_status["actuator"] = True
+        reference_data = {"hdroutetoglobal": data}
+        from planner import init_reference_path
+        init_reference_path(reference_data)
+        check_and_process_data()
+    else:
+        rospy.loginfo("hdroutetoglobal already received!")  
+
 def offline_test():
     """离线测试模式"""
     global bag_data, frame_data, data_status
@@ -299,9 +284,8 @@ def offline_test():
             print("Incomplete data for this frame, skipping...")
 
 def main():
-    """主函数"""
     # 选择运行模式
-    if len(sys.argv) > 1 and sys.argv[1] == '--offline':
+    if len(sys.argv) > 1 and sys.argv[1] == '--offline': # sys.argv[0] == filename.py sys.argv[1] == '--offline'
         print("Running in offline mode...")
         offline_test()
     else:
@@ -312,8 +296,8 @@ def main():
         global pub_ego_plan
         global pub_ego_decision
         
-        pub_ego_plan = rospy.Publisher("/planningmotion", planningmotion, queue_size=5)
-        pub_ego_decision = rospy.Publisher("/behaviordecision", decisionbehavior, queue_size=5)
+        pub_ego_plan = rospy.Publisher("/planningmotion", planningmotion, queue_size=3)
+        pub_ego_decision = rospy.Publisher("/behaviordecision", decisionbehavior, queue_size=3)
         
         # 订阅传感器数据
         rospy.Subscriber("/objectTrack/track_results", sensorobjects, callback_objectTrack, queue_size=3)
@@ -322,8 +306,8 @@ def main():
         rospy.Subscriber("/sensorgps", sensorgps, callback_sensorgps, queue_size=3)
         
         rospy.loginfo("ROS node initialized and waiting for data...")
-        rate = rospy.Rate(100)
-        rospy.spin()
+        rate = rospy.Rate(100) # 100Hz  
+        rospy.spin() # keep the node running
 
 if __name__ == "__main__":
     main()

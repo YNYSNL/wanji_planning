@@ -46,27 +46,6 @@ class lon_lat_to_xy:
             }
         return state_dict
 
-class lon_lat_to_xy_map:
-    def __init__(self, data_list, flag1=False):
-        self.data_list = data_list
-        self.veh_num = len(self.data_list)
-        self.flag1 = flag1
-
-
-    def get_pos(self):
-        state_dict = {}
-
-        data = self.data_list.map.point
-        # 经纬度转为笛卡尔坐标
-        x, y = proj(data.lon, data.lat)
-        state_dict[str(veh)] = {
-            'x': x,
-            'y': y,
-            'v': float(data.velocity),  # 车辆速度
-            'heading': float(data.heading),  # 航向角
-        }
-        return state_dict
-
 class xy_to_lon_lat:
     def __init__(self, state_list, data_list):
         self.state_list = state_list

@@ -95,55 +95,49 @@ def coordinate_transform(x, y, target_heading=320):
     
     return new_x, new_y
 
-def yaw_to_heading(yaw):
-    # yaw 转 heading
-    # 1. 先将yaw转换为以北为0的角度（逆时针为正）
-    north_angle = np.pi/2 - yaw
-    # 2. 转换为顺时针为正
-    heading = -north_angle
-    # 3. 归一化到0-2π范围
-    heading = heading % (2 * np.pi)
-    # 4. 转换为角度
-    heading_deg = math.degrees(heading)
-    return heading_deg
-
-def heading_to_yaw(heading_deg):
-    # heading 转 yaw
-    # 1. 转换为弧度
-    heading = math.radians(heading_deg)
-    # 2. 转换为逆时针为正
-    north_angle = -heading
-    # 3. 转换为以x轴为0的角度
-    yaw = np.pi/2 - north_angle
-    # 4. 归一化到-π到π范围
-    yaw = (yaw + np.pi) % (2 * np.pi) - np.pi
-    return yaw
-
 def init_reference_path(reference_data):
-    """初始化参考线信息"""
+    """初始化参考线信息并计算累计距离s值"""
     global ref_lons, ref_lats, ref_s, vehicle_init_pos
+    
+    # 清空之前的数据
+    ref_lons = []
+    ref_lats = []
+    ref_s = []
     
     try:
         # 因为传入的是 ref_dict，所以需要先获取 hdroutetoglobal 数据
         hd_route = reference_data["hdroutetoglobal"]
+        
+        # 遍历地图数据，保持与原始代码相同的循环结构
         for hdmap_msg in hd_route.map:
             for point in hdmap_msg.point:
+                # 添加经纬度
                 ref_lons.append(point.lon)
                 ref_lats.append(point.lat)
                 
+                # 计算s值
+                if len(ref_s) == 0:
+                    # 第一个点的s值为0
+                    ref_s.append(0.0)
+                else:
+                    # 获取前一个点的索引
+                    prev_idx = len(ref_lons) - 2
+                    
+                    # 计算与前一点的距离
+                    dist = calc_distance(
+                        ref_lons[prev_idx], ref_lats[prev_idx],
+                        point.lon, point.lat
+                    )
+                    
+                    # 累加s值
+                    ref_s.append(ref_s[-1] + dist)
+        
+        rospy.loginfo(f"Reference path initialized with {len(ref_lons)} points")
+        
     except Exception as e:
-        print("Error processing reference_data:", e)
-        print("reference_data:", reference_data)
+        rospy.logerr(f"Error processing reference_data: {e}")
+        rospy.logerr(f"reference_data: {reference_data}")
         return None
-    
-    # 计算参考线的累计距离，但先不赋值给ref_s
-    temp_s = [0]
-    for i in range(1, len(ref_lons)):
-        dist = calc_distance(ref_lons[i-1], ref_lats[i-1], ref_lons[i], ref_lats[i])
-        temp_s.append(temp_s[-1] + dist)
-    
-    # rospy.loginfo("参考线初始化完成，共 %d 个点", len(ref_lons))
-    return True
 
 def calc_distance(lon1, lat1, lon2, lat2):
     """计算两点间大地距离"""
@@ -158,7 +152,25 @@ def calc_distance(lon1, lat1, lon2, lat2):
         np.sin(delta_lambda/2) * np.sin(delta_lambda/2)
     c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
     return R * c
-
+# def calc_distance(lon1, lat1, lon2, lat2):
+#     """计算两点之间的距离"""
+#     # 使用Haversine公式计算球面距离
+#     R = 6371000  # 地球半径，单位米
+    
+#     # 转换为弧度
+#     lat1_rad = np.radians(lat1)
+#     lon1_rad = np.radians(lon1)
+#     lat2_rad = np.radians(lat2)
+#     lon2_rad = np.radians(lon2)
+    
+#     # Haversine公式
+#     dlon = lon2_rad - lon1_rad
+#     dlat = lat2_rad - lat1_rad
+#     a = np.sin(dlat/2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon/2)**2
+#     c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+#     distance = R * c
+    
+    return distance
 def xy_to_latlon(lon_origin, lat_origin, x, y):
 
     proj_string = "+proj=tmerc +lon_0=" + str(lon_origin) + " +lat_0=" + str(lat_origin) + " +ellps=WGS84"
@@ -171,283 +183,6 @@ def xy_to_latlon(lon_origin, lat_origin, x, y):
                                                        y + proj(lon_origin, lat_origin)[1])
 
     return lon_target, lat_target
-
-def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
-    global ref_lons, ref_lats, ref_s, vehicle_init_pos
-    DataFromEgo = copy.deepcopy(state_data)
-    # print('DataFromEgo', DataFromEgo)
-
-    # Get the current sensor data
-    # sensorgps_data = frame_data.get("sensorgps")
-
-    # v0 = sensorgps_data.velocity
-    # heading = sensorgps_data.heading
-    if not ref_lons and reference_data:
-        # print("reference_data type:", type(reference_data))
-        init_reference_path(reference_data)
-
-    ego_state = Node(
-        x=DataFromEgo['0'].get("x", 0.0) * 100, 
-        y=DataFromEgo['0'].get("y", 0.0) * 100, 
-        yaw=np.pi/2, 
-        v=DataFromEgo['0'].get("v", 0.0) * 100, 
-        gx=DataFromEgo['0'].get("gx", 0.0), 
-        gy=DataFromEgo['0'].get("gy", 0.0), 
-        direct=1.0,
-        heading=DataFromEgo['0'].get("heading", 0.0)
-    )
-    current_pos = (ego_state.gx, ego_state.gy)
-    
-    # 如果是第一次运行，初始化车辆初始位置
-    if vehicle_init_pos is None and ref_lons:
-        vehicle_init_pos = current_pos
-        # 找到距离初始位置最近的参考线点
-        distances = []
-        for i in range(len(ref_lons)):
-            dist = calc_distance(vehicle_init_pos[0], vehicle_init_pos[1], ref_lons[i], ref_lats[i])
-            distances.append(dist)
-        init_idx = np.argmin(distances)
-        
-        # 预先计算相邻点之间的距离
-        point_distances = []
-        for j in range(len(ref_lons)-1):
-            dist = calc_distance(ref_lons[j], ref_lats[j], ref_lons[j+1], ref_lats[j+1])
-            point_distances.append(dist)
-            
-        ref_s = [0] * len(ref_lons)  # 预分配列表空间
-        
-        # 计算init_idx之前的点的累积距离（负值）
-        curr_dist = 0
-        for i in range(init_idx - 1, -1, -1):
-            curr_dist += point_distances[i]
-            ref_s[i] = -curr_dist
-            
-        # 计算init_idx之后的点的累积距离（正值）
-        curr_dist = 0
-        for i in range(init_idx, len(ref_lons)-1):
-            curr_dist += point_distances[i]
-            ref_s[i+1] = curr_dist
-          
-    # Acceleration and time steps for the motion plan
-    a = 2  # Constant acceleration
-    delta = 0
-    # t_max = 3  # Total time for the trajectory
-    time_steps = 50  # Number of time steps to break down the trajectory
-    x_array = np.zeros(time_steps)
-    y_array = np.zeros(time_steps)
-    yaw_array = np.zeros(time_steps)
-    v_array = np.zeros(time_steps)
-
-    x_array[0] = ego_state.x
-    y_array[0] = ego_state.y
-    yaw_array[0] = ego_state.yaw
-    v_array[0] = ego_state.v
-
-    for i in range(1,time_steps):
-        ego_state.update(a*100, delta, 1.0)
-        # 存储每个时间步的状态
-        x_array[i] = ego_state.x
-        y_array[i] = ego_state.y
-        yaw_array[i] = ego_state.yaw
-        v_array[i] = ego_state.v
-
-    # 预先创建KD树用于快速查找最近点
-    if ref_lons and ref_lats:
-        ref_points = np.column_stack((ref_lons, ref_lats))
-        kdtree = cKDTree(ref_points)
-
-    base_point = roadpoint()
-    base_point.speed = 15
-    base_point.roadtype = 2
-    base_point.turnlight = 0
-    base_point.a = a
-    base_point.jerk = 0
-    base_point.lanewidth = 0
-
-
-    x_array_global, y_array_global= coordinate_transform(x_array, y_array, target_heading=ego_state.heading)
-
-    # 计算相对于车辆位置的局部坐标
-    # dx_array = x_array - ego_state.x  # 相对于车辆位置的x偏移
-    # dy_array = y_array - ego_state.y  # 相对于车辆位置的y偏移
-    
-    # # 使用相对坐标进行转换
-    # x_array_global, y_array_global = coordinate_transform(dx_array, dy_array, target_heading=ego_state.heading)
-    
-    # # 转换回全局坐标
-    # x_array_global += ego_state.x
-    # y_array_global += ego_state.y
-
-    # 批量创建轨迹点
-    raw_trajectory_points = []
-    # 批量创建轨迹点
-    if ref_lons:
-        start_time1 = time.time()
-        # 批量转换所有点的经纬度
-        gx_array, gy_array = xy_to_latlon_batch(
-            ego_state.gx, ego_state.gy,
-            x_array_global/100, y_array_global/100)
-        end_time1 = time.time()
-        print(f"转换经纬度耗时：{end_time1 - start_time1} s")
-        # 批量查找最近点 (使用更大的leaf_size可能会更快)
-        kdtree = cKDTree(np.column_stack((ref_lons, ref_lats)), leafsize=100)
-        _, nearest_indices = kdtree.query(
-            np.column_stack((gx_array, gy_array)),
-            workers=-1  # 使用多线程
-        )
-        start_time2 = time.time()
-        # 批量计算exact_dist
-        exact_dists = calc_distance_batch(
-            gx_array, gy_array,
-            np.array(ref_lons)[nearest_indices],
-            np.array(ref_lats)[nearest_indices]
-        )
-        end_time2 = time.time()
-        print(f"计算exact_dist耗时：{end_time2 - start_time2} s")
-        s_values = np.array(ref_s)[nearest_indices] + exact_dists
-    # else:
-    #     s_values = t_array * 0.1 * ego_state.v
-    #     gx_array, gy_array = xy_to_latlon_batch(
-    #         ego_state.gx, ego_state.gy,
-    #         x_array/100, y_array/100)
-
-    yaw_deg_local = np.degrees(yaw_array)
-    heading_glob = ego_state.heading - yaw_deg_local + 90
-    heading_glob = (heading_glob + 360) % 360
-    raw_trajectory_points = [
-        roadpoint(
-            x=x, y=y, gx=gx, gy=gy,
-            speed=base_point.speed,
-            heading=yaw,
-            roadtype=base_point.roadtype,
-            turnlight=base_point.turnlight,
-            a=base_point.a,
-            jerk=base_point.jerk,
-            lanewidth=base_point.lanewidth,
-            s=s
-        ) for x, y, gx, gy, s, yaw in zip(x_array, y_array, gx_array, gy_array, s_values, heading_glob)
-    ]
-    points_array = np.column_stack((x_array, y_array))
-    diff = np.diff(points_array, axis=0)
-    distances = np.sqrt(np.sum(diff**2, axis=1))
-    
-    trajectory_points = []
-   
-    # 预先计算所有需要插值的点的索引
-    interpolation_indices = np.where(distances > 20)[0]
-
-    start_time3 = time.time()
-    
-    if len(interpolation_indices) > 0:
-        # 预分配存储空间
-        all_x_interp = []
-        all_y_interp = []
-        all_ratios = []
-        total_points = 0
-        
-        # 一次性计算所有插值点的x,y坐标
-        for idx in interpolation_indices:
-            current_point = raw_trajectory_points[idx]
-            next_point = raw_trajectory_points[idx + 1]
-            num_points = int(np.ceil(distances[idx]/20))
-            
-            # ratios = np.linspace(1/num_points, 1-1/num_points, num_points-1)
-            ratios = np.linspace(0, 1, num_points+1)[1:]
-            x_interp = current_point.x + (next_point.x - current_point.x) * ratios
-            y_interp = current_point.y + (next_point.y - current_point.y) * ratios
-            
-            all_x_interp.extend(x_interp)
-            all_y_interp.extend(y_interp)
-            all_ratios.extend(ratios)
-            total_points += len(ratios)
-        
-        # 将所有插值点转换为numpy数组
-        all_x_interp = np.array(all_x_interp)
-        all_y_interp = np.array(all_y_interp)
-
-        all_x_interp_global, all_y_interp_global= coordinate_transform(all_x_interp, all_y_interp, target_heading=ego_state.heading)
-        
-        # 一次性批量转换所有插值点的经纬度
-        gx_interp_all, gy_interp_all = xy_to_latlon_batch(
-            ego_state.gx, ego_state.gy,
-            all_x_interp_global/100, all_y_interp_global/100)
-        
-        # 创建基础点对象作为模板
-        # base_point = roadpoint()
-        # base_point.speed = raw_trajectory_points[0].speed
-        # base_point.roadtype = raw_trajectory_points[0].roadtype
-        # base_point.turnlight = raw_trajectory_points[0].turnlight
-        # base_point.a = raw_trajectory_points[0].a
-        # base_point.jerk = raw_trajectory_points[0].jerk
-        # base_point.lanewidth = raw_trajectory_points[0].lanewidth
-        
-        # 重新组织插值点
-        point_idx = 0
-        for i in range(len(raw_trajectory_points) - 1):
-            current_point = raw_trajectory_points[i]
-            next_point = raw_trajectory_points[i + 1]
-            
-            # 计算当前点和下一点之间的距离
-            distance = np.sqrt((next_point.x - current_point.x)**2 + 
-                             (next_point.y - current_point.y)**2)
-            
-            trajectory_points.append(current_point)
-            
-            # 只有当距离大于20时才进行插值
-            if distance > 20:
-                num_points = int(np.ceil(distance/20)) - 1
-                ratios = np.linspace(1/num_points, 1-1/num_points, num_points)
-                heading_interp = current_point.heading + \
-                               (next_point.heading - current_point.heading) * ratios
-                
-                # 批量创建这段的插值点
-                for j in range(num_points):
-                    new_point = roadpoint()
-                    new_point.x = all_x_interp[point_idx]
-                    new_point.y = all_y_interp[point_idx]
-                    new_point.gx = gx_interp_all[point_idx]
-                    new_point.gy = gy_interp_all[point_idx]
-                    new_point.speed = base_point.speed
-                    new_point.heading = heading_interp[j]
-                    new_point.roadtype = base_point.roadtype
-                    new_point.turnlight = base_point.turnlight
-                    new_point.a = base_point.a
-                    new_point.jerk = base_point.jerk
-                    new_point.lanewidth = base_point.lanewidth
-                    new_point.s = current_point.s + (next_point.s - current_point.s) * (j+1)/(num_points+1)
-                    
-                    trajectory_points.append(new_point)
-                    point_idx += 1
-        
-        # 添加最后一个点
-        trajectory_points.append(raw_trajectory_points[-1])
-
-    else:
-        # 如果没有需要插值的点，直接使用原始点
-        trajectory_points = raw_trajectory_points
-
-    end_time3 = time.time()
-    print(f"插值耗时：{end_time3 - start_time3} s")
-
-    # Update the ego_plan with the generated trajectory points
-    ego_plan.points = trajectory_points
-    # print('ego_plan.points', ego_plan.points)
-
-    # plt.plot(ego_plan.points.x, ego_plan.points.y, marker='o', label='Trajectory Points')
-    # plt.savefig('trajectory_plot.png')
-    ego_plan.guidespeed = 20  # Final velocity
-    ego_plan.guideangle = 0 # Final heading
-    ego_plan.timestamp = int(rospy.Time.now().to_sec()*1000)
-
-    # Decision-making (example behavior)
-    ego_decision.drivebehavior = 1  # Drive behavior, this could be adjusted
-    ego_decision.guidespeed = 20
-    ego_decision.carworkstatus = 0
-    ego_decision.timestamp = int(rospy.Time.now().to_sec()*1000)
-
-    # rospy.loginfo(f"Planning result: ego_plan={ego_plan}, ego_decision={ego_decision}")
-
-    return ego_plan, ego_decision
 
 
 def bag_plan(bag_data, t, ego_plan, ego_decision):
@@ -467,3 +202,262 @@ def bag_plan(bag_data, t, ego_plan, ego_decision):
     ego_decision.drivebehavior = 2  # Drive behavior, this could be adjusted
 
     return ego_plan, ego_decision
+
+def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
+    """
+    基于当前状态数据和参考线数据生成规划轨迹和决策
+    
+    Args:
+        state_data: 车辆当前状态数据
+        reference_data: 参考线数据
+        ego_plan: 规划轨迹消息对象
+        ego_decision: 决策消息对象
+        
+    Returns:
+        ego_plan: 更新后的规划轨迹消息
+        ego_decision: 更新后的决策消息
+    """
+    global ref_lons, ref_lats, ref_s, vehicle_init_pos
+    
+    # 深拷贝输入数据，避免修改原始数据
+    DataFromEgo = copy.deepcopy(state_data)
+    
+    # 如果参考线数据为空且有新的参考线数据，则初始化参考线
+    if not ref_lons and reference_data:
+        init_reference_path(reference_data)
+    
+    # 创建车辆状态对象
+    ego_state = Node(
+        x=DataFromEgo['0'].get("x", 0.0) * 100, 
+        y=DataFromEgo['0'].get("y", 0.0) * 100, 
+        yaw=np.pi/2, 
+        v=DataFromEgo['0'].get("v", 0.0) * 100, 
+        gx=DataFromEgo['0'].get("gx", 0.0), 
+        gy=DataFromEgo['0'].get("gy", 0.0), 
+        direct=1.0,
+        heading=DataFromEgo['0'].get("heading", 0.0)
+    )
+    current_pos = (ego_state.gx, ego_state.gy)
+    
+    # 初始化车辆初始位置（仅在第一次规划时）
+    if vehicle_init_pos is None:
+        vehicle_init_pos = current_pos
+        rospy.loginfo(f"Vehicle initial position set to: {vehicle_init_pos}")
+    
+    # 1. 基于车辆坐标系生成粗线条轨迹
+    time_steps = 50
+    a = 2  # 加速度
+    delta = 0  # 转向角
+    
+    x_local, y_local, yaw_local, v_local = generate_trajectory(ego_state, time_steps, a, delta)
+    
+    # 2. 在车辆坐标系下对轨迹进行加密
+    x_local_dense, y_local_dense, yaw_local_dense = densify_trajectory(x_local, y_local, yaw_local, max_distance=20)
+    
+    # 3. 将加密后的轨迹从车辆坐标系旋转到全局坐标系
+    x_global_dense, y_global_dense = coordinate_transform(x_local_dense, y_local_dense, target_heading=ego_state.heading)
+    
+    # 计算全局航向角
+    yaw_deg_local_dense = np.degrees(yaw_local_dense)
+    heading_global_dense = ego_state.heading - yaw_deg_local_dense + 90
+    heading_global_dense = (heading_global_dense + 360) % 360
+    
+    # 4. 一次性将所有点转换为经纬度坐标
+    gx_dense, gy_dense = xy_to_latlon_batch(
+        ego_state.gx, ego_state.gy,
+        x_global_dense/100, y_global_dense/100)
+    
+    # 5. 计算s值（相对于仿真初始位置的累计行驶距离）
+    if ref_lons and ref_lats and ref_s:
+        # 创建KD树用于快速查找最近点
+        ref_points = np.column_stack((ref_lons, ref_lats))
+        kdtree = cKDTree(ref_points, leafsize=100)
+        
+        # 找到车辆初始位置在参考线上的投影点（仅在第一次规划时计算）
+        if not hasattr(CACS_plan, 'init_s_offset'):
+            init_pos_array = np.array([[vehicle_init_pos[0], vehicle_init_pos[1]]])
+            _, init_nearest_idx = kdtree.query(init_pos_array, k=1)
+            init_nearest_idx = init_nearest_idx[0]
+            
+            # 计算初始位置到最近参考点的精确距离
+            init_exact_dist = calc_distance(
+                vehicle_init_pos[0], vehicle_init_pos[1],
+                ref_lons[init_nearest_idx], ref_lats[init_nearest_idx]
+            )
+            
+            # 初始位置的s值
+            CACS_plan.init_s_offset = ref_s[init_nearest_idx] + init_exact_dist
+            rospy.loginfo(f"Initial s offset set to: {CACS_plan.init_s_offset}")
+        
+        # 批量查找轨迹点最近的参考线点
+        _, nearest_indices = kdtree.query(
+            np.column_stack((gx_dense, gy_dense)),
+            workers=-1
+        )
+        
+        # 批量计算轨迹点到参考线的精确距离
+        exact_dists = calc_distance_batch(
+            gx_dense, gy_dense,
+            np.array(ref_lons)[nearest_indices],
+            np.array(ref_lats)[nearest_indices]
+        )
+        
+        # 计算参考线上的s值
+        ref_s_values = np.array(ref_s)[nearest_indices] + exact_dists
+        
+        # 计算相对于仿真初始位置的s值
+        s_values = ref_s_values - CACS_plan.init_s_offset
+    else:
+        # 如果没有参考线，使用累计距离作为s值
+        s_values = np.zeros(len(x_global_dense))
+        for i in range(1, len(x_global_dense)):
+            s_values[i] = s_values[i-1] + np.sqrt(
+                (x_global_dense[i] - x_global_dense[i-1])**2 + 
+                (y_global_dense[i] - y_global_dense[i-1])**2
+            )
+    
+    # 6. 创建基础点属性
+    base_point = roadpoint()
+    base_point.speed = 15
+    base_point.roadtype = 2
+    base_point.turnlight = 0
+    base_point.a = a
+    base_point.jerk = 0
+    base_point.lanewidth = 0
+    
+    # 8. 创建最终轨迹点列表
+    trajectory_points = []
+    for i in range(len(x_global_dense)):
+        point = roadpoint()
+        point.x = x_local_dense[i]
+        point.y = y_local_dense[i]
+        point.gx = gx_dense[i]
+        point.gy = gy_dense[i]
+        point.speed = base_point.speed
+        point.heading = heading_global_dense[i]
+        point.roadtype = base_point.roadtype
+        point.turnlight = base_point.turnlight
+        point.a = base_point.a
+        point.jerk = base_point.jerk
+        point.lanewidth = base_point.lanewidth
+        point.s = s_values[i]
+        trajectory_points.append(point)
+    
+    # 9. 设置规划消息
+    ego_plan.points = trajectory_points
+    ego_plan.guidespeed = 20  # 目标速度
+    ego_plan.guideangle = 0   # 目标航向角
+    ego_plan.timestamp = int(rospy.Time.now().to_sec() * 1000)
+    
+    # 10. 设置决策消息
+    ego_decision.drivebehavior = 1  # 驾驶行为
+    ego_decision.guidespeed = 20    # 目标速度
+    ego_decision.carworkstatus = 0  # 车辆工作状态
+    ego_decision.timestamp = int(rospy.Time.now().to_sec() * 1000)
+    
+    rospy.loginfo("Generated trajectory with {} points".format(len(trajectory_points)))
+    
+    return ego_plan, ego_decision
+
+# 辅助函数
+
+def generate_trajectory(ego_state, time_steps=50, a=2, delta=0):
+    """生成基于车辆坐标系的粗线条轨迹"""
+    # 创建车辆状态的副本，避免修改原始状态
+    vehicle_state = copy.deepcopy(ego_state)
+    
+    # 初始化轨迹数组
+    x = np.zeros(time_steps)
+    y = np.zeros(time_steps)
+    yaw = np.zeros(time_steps)
+    v = np.zeros(time_steps)
+    
+    # 设置初始状态
+    x[0] = vehicle_state.x
+    y[0] = vehicle_state.y
+    yaw[0] = vehicle_state.yaw
+    v[0] = vehicle_state.v
+    
+    # 生成轨迹点
+    for i in range(1, time_steps):
+        vehicle_state.update(a*100, delta, 1.0)
+        x[i] = vehicle_state.x
+        y[i] = vehicle_state.y
+        yaw[i] = vehicle_state.yaw
+        v[i] = vehicle_state.v
+    
+    return x, y, yaw, v
+
+def densify_trajectory(x, y, yaw, max_distance=20):
+    """对轨迹进行加密，确保相邻点距离不超过指定值（向量化实现）"""
+    # 计算所有相邻点之间的距离
+    points = np.column_stack((x, y))
+    diff = np.diff(points, axis=0)
+    distances = np.sqrt(np.sum(diff**2, axis=1))
+    
+    # 如果没有需要插值的点，直接返回原始轨迹
+    if np.all(distances <= max_distance):
+        return x, y, yaw
+    
+    # 计算每段需要插入的点数
+    num_segments = len(distances)
+    num_points_to_insert = np.maximum(0, np.ceil(distances / max_distance).astype(int) - 1)
+    total_points = num_segments + 1 + np.sum(num_points_to_insert)  # 原始点数 + 插值点数
+    
+    # 预分配结果数组
+    x_dense = np.zeros(total_points)
+    y_dense = np.zeros(total_points)
+    yaw_dense = np.zeros(total_points)
+    
+    # 填充第一个点
+    x_dense[0] = x[0]
+    y_dense[0] = y[0]
+    yaw_dense[0] = yaw[0]
+    
+    # 当前填充位置索引
+    current_idx = 1
+    
+    # 批量处理所有段
+    for i in range(num_segments):
+        # 当前段的起点和终点
+        x1, y1, yaw1 = x[i], y[i], yaw[i]
+        x2, y2, yaw2 = x[i+1], y[i+1], yaw[i+1]
+        
+        # 需要插入的点数
+        n_insert = num_points_to_insert[i]
+        
+        if n_insert > 0:
+            # 计算插值比例
+            ratios = np.linspace(0, 1, n_insert + 2)[1:-1]
+            
+            # 线性插值
+            x_interp = x1 + (x2 - x1) * ratios
+            y_interp = y1 + (y2 - y1) * ratios
+            yaw_interp = yaw1 + (yaw2 - yaw1) * ratios
+            
+            # 填充插值点
+            x_dense[current_idx:current_idx + n_insert] = x_interp
+            y_dense[current_idx:current_idx + n_insert] = y_interp
+            yaw_dense[current_idx:current_idx + n_insert] = yaw_interp
+            
+            current_idx += n_insert
+        
+        # 填充当前段的终点（除了最后一段，因为最后一点会单独处理）
+        if i < num_segments - 1:
+            x_dense[current_idx] = x2
+            y_dense[current_idx] = y2
+            yaw_dense[current_idx] = yaw2
+            current_idx += 1
+    
+    # 填充最后一个点
+    x_dense[current_idx] = x[-1]
+    y_dense[current_idx] = y[-1]
+    yaw_dense[current_idx] = yaw[-1]
+    
+    # 如果预分配的空间有多余，裁剪掉
+    if current_idx + 1 < total_points:
+        x_dense = x_dense[:current_idx + 1]
+        y_dense = y_dense[:current_idx + 1]
+        yaw_dense = yaw_dense[:current_idx + 1]
+    
+    return x_dense, y_dense, yaw_dense

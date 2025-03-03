@@ -99,7 +99,7 @@ class Node:
         delta = self.limit_input_delta(delta)
         self.x += self.v * math.cos(self.yaw) * P.dt
         self.y += self.v * math.sin(self.yaw) * P.dt
-        # self.yaw += self.v / P.WB * math.tan(delta) * P.dt
+        self.yaw += self.v / P.WB * math.tan(delta) * P.dt
         self.direct = direct
         self.v += self.direct * a * P.dt
         self.v = self.limit_speed(self.v)
