@@ -34,10 +34,10 @@ class P:
     speed_stop = 0.5 / 3.6  # stop permitted when speed < speed_stop
     time_max = 500.0  # max simulation time
     iter_max = 5  # max iteration
-    target_speed = 20.0 / 3.6  # target speed
+    target_speed = 20.0 / 3.6 * 100  # target speed
     N_IND = 10  # search index number
     dt = 0.1  # time step
-    d_dist = 1.0  # dist step
+    d_dist = 1.0 * 100 # dist step
     du_res = 0.1  # threshold for stopping iteration
 
     # vehicle config
@@ -45,15 +45,15 @@ class P:
     RB = 0.8  # [m] distance from rear to vehicle back end of vehicle
     W = 2.4  # [m] width of vehicle
     WD = 0.7 * W  # [m] distance between left-right wheels
-    WB = 2.5  # [m] Wheel base
+    WB = 2.5 * 100  # [m] Wheel base
     TR = 0.44  # [m] Tyre radius
     TW = 0.7  # [m] Tyre width
 
     steer_max = np.deg2rad(45.0)  # max steering angle [rad]
     steer_change_max = np.deg2rad(30.0)  # maximum steering speed [rad/s]
-    speed_max = 55.0 / 3.6 *100  # maximum speed [m/s]
+    speed_max = 55.0 / 3.6 * 100  # maximum speed [m/s]
     speed_min = -20.0 / 3.6 * 100  # minimum speed [m/s]
-    acceleration_max = 4.0  # maximum acceleration [m/s2]
+    acceleration_max = 4.0 * 100  # maximum acceleration [m/s2]
 
     num_obstacles = 1  # number of obstacles
     obstacles = dict()  # obstacles: {id: [x, y, w, h]}
@@ -65,24 +65,7 @@ class P:
         cls.num_obstacles = num_obstacles
         cls.obstacles = dict()
         cls.obstacle_horizon = obstacle_horizon
-        cls.num_modes = num_modes
-
-    def re_linearize(self,initial_state_plan, initial_control_plan):
-        state_dim = self.NX
-        control_dim = self.NU
-        s_discrete = self.S_discrete
-        s_state = self.S_state
-
-        # dynamic constraints
-        for k in range(s_discrete - 1):
-            Ak, Bk = linearize_dynamics(discrete_dynamics, initial_state_plan[0:state_dim - 1, k],
-                                        initial_control_plan[0:control_dim - 1, k], dt)
-            self.As[k] = Ak
-            self.Bs[k] = Bk
-            self.gs[k] = discrete_dynamics(initial_state_plan[0:state_dim - 1, k],
-                                           initial_control_plan[0:control_dim - 1, k],
-                                           dt) - Ak @ initial_state_plan[
-                                                      0:state_dim - 1, k]        
+        cls.num_modes = num_modes   
 
 
 class Node:
@@ -134,6 +117,12 @@ class PATH:
         self.ck = ck
         self.length = len(cx)
         self.ind_old = 0
+    
+    def update(self, cx, cy, cyaw, ck):
+        self.cx = cx
+        self.cy = cy
+        self.cyaw = cyaw
+        self.ck = ck
 
     def nearest_index(self, node):
         """
@@ -142,9 +131,11 @@ class PATH:
         :return: nearest index, lateral distance to ref point
         """
 
-        dx = [node.x - x for x in self.cx[self.ind_old: (self.ind_old + P.N_IND)]]
-        dy = [node.y - y for y in self.cy[self.ind_old: (self.ind_old + P.N_IND)]]
-        dist = np.hypot(dx, dy)
+        dx = [node.x - x for x in self.cx[self.ind_old:]]
+        dy = [node.y - y for y in self.cy[self.ind_old:]]
+        dx_tensor = np.array(dx)
+        dy_tensor = np.array(dy)
+        dist = np.hypot(dx_tensor, dy_tensor)
 
         ind_in_N = int(np.argmin(dist))
         ind = self.ind_old + ind_in_N
@@ -153,8 +144,8 @@ class PATH:
         rear_axle_vec_rot_90 = np.array([[math.cos(node.yaw + math.pi / 2.0)],
                                          [math.sin(node.yaw + math.pi / 2.0)]])
 
-        vec_target_2_rear = np.array([[dx[ind_in_N]],
-                                      [dy[ind_in_N]]])
+        vec_target_2_rear = np.array([[dx_tensor.cpu().numpy()[ind_in_N]],
+                                      [dy_tensor.cpu().numpy()[ind_in_N]]])
 
         er = np.dot(vec_target_2_rear.T, rear_axle_vec_rot_90)
         er = er[0][0]
@@ -164,36 +155,61 @@ class PATH:
 
 def calc_ref_trajectory_in_T_step(node, ref_path, sp):
     """
-    calc referent trajectory in T steps: [x, y, v, yaw]
-    using the current velocity, calc the T points along the reference path
-    :param node: current information
-    :param ref_path: reference path: [x, y, yaw]
-    :param sp: speed profile (designed speed strategy)
-    :return: reference trajectory
+    使用匀加速运动生成参考轨迹
     """
-
     z_ref = np.zeros((P.NX, P.T + 1))
     length = ref_path.length
-
+    
+    # 设置舒适加速度（可调整）
+    comfort_acc = 1.0  # m/s^2
+    
+    # 计算匀加速运动末端速度
+    v0 = abs(node.v)
+    vT = v0 + comfort_acc * P.dt * P.T
+    
+    # 判断是否需要调整加速度
+    if vT > P.target_speed:
+        # 如果末端速度超过目标速度，反推所需加速度
+        vT = P.target_speed
+        acc = (vT - v0) / (P.dt * P.T)
+    else:
+        # 使用舒适加速度
+        acc = comfort_acc
+    
+    # 生成速度序列
+    v_seq = np.zeros(P.T + 1)
+    v_seq[0] = v0
+    for i in range(1, P.T + 1):
+        v_seq[i] = v0 + acc * P.dt * i
+    
+    # 计算累积位移序列
+    s_seq = np.zeros(P.T + 1)
+    for i in range(1, P.T + 1):
+        # s = v0*t + 1/2*a*t^2
+        t = P.dt * i
+        s_seq[i] = v0 * t + 0.5 * acc * t * t
+    
+    # 找到参考路径上的对应点
     ind, _ = ref_path.nearest_index(node)
-
+    
+    # 设置初始点
     z_ref[0, 0] = ref_path.cx[ind]
     z_ref[1, 0] = ref_path.cy[ind]
-    z_ref[2, 0] = sp[ind]
+    z_ref[2, 0] = v_seq[0]
     z_ref[3, 0] = ref_path.cyaw[ind]
-
-    dist_move = 0.0
-
+    
+    # 根据累积位移找到对应的参考点
     for i in range(1, P.T + 1):
-        dist_move += abs(node.v) * P.dt
-        ind_move = int(round(dist_move / P.d_dist))
+        # 计算索引增量
+        ind_move = int(round(s_seq[i] / P.d_dist))
         index = min(ind + ind_move, length - 1)
-
+        
+        # 设置参考点
         z_ref[0, i] = ref_path.cx[index]
         z_ref[1, i] = ref_path.cy[index]
-        z_ref[2, i] = sp[index]
+        z_ref[2, i] = v_seq[i]  # 使用计算得到的速度序列
         z_ref[3, i] = ref_path.cyaw[index]
-
+    
     return z_ref, ind
 
 
@@ -310,12 +326,6 @@ def solve_linear_mpc(z_ref, z_bar, z0, d_bar):
             cost += cvxpy.quad_form(u[:, t + 1] - u[:, t], P.Rd)
             constrains += [cvxpy.abs(u[1, t + 1] - u[1, t]) <= P.steer_change_max * P.dt]
 
-        # # 添加障碍物约束
-        # for (ox, oy) in obstacles:
-        #     # 计算车辆与障碍物的距离
-        #     dist_to_obstacle = cvxpy.sqrt((z[0, t] - ox)**2 + (z[1, t] - oy)**2)
-        #     constrains += [dist_to_obstacle >= 1.0]
-
     cost += cvxpy.quad_form(z_ref[:, P.T] - z[:, P.T], P.Qf)
 
     constrains += [z[:, 0] == z0]
@@ -325,22 +335,55 @@ def solve_linear_mpc(z_ref, z_bar, z0, d_bar):
     constrains += [cvxpy.abs(u[1, :]) <= P.steer_max]
 
     prob = cvxpy.Problem(cvxpy.Minimize(cost), constrains)
-    prob.solve(solver=cvxpy.OSQP)
+    solver_opts = {
+        'verbose': False,
+        'eps_abs': 1e-3,        # 放宽误差容限
+        'eps_rel': 1e-3,
+        'max_iter': 10000,      
+        'adaptive_rho': True,   
+        'polish': True,         
+        'warm_start': True,
+        'rho': 1.0,            # 添加初始步长参数
+        'sigma': 1e-6,         # 添加正则化参数
+        'alpha': 1.6,          # 添加过松弛参数
+    }
+    
+    try:
+        result = prob.solve(solver=cvxpy.OSQP, **solver_opts)
+    except:
+        print("OSQP failed, trying with modified parameters")
+        # 如果失败，尝试使用更保守的参数
+        solver_opts.update({
+            'eps_abs': 1e-2,
+            'eps_rel': 1e-2,
+            'rho': 0.1,
+            'sigma': 1e-4,
+        })
+        try:
+            result = prob.solve(solver=cvxpy.OSQP, **solver_opts)
+        except:
+            print("OSQP failed again, trying ECOS")
+            try:
+                result = prob.solve(solver=cvxpy.ECOS,
+                                  max_iters=100,
+                                  abstol=1e-2,
+                                  reltol=1e-2,
+                                  verbose=False)
+            except:
+                print("All optimization attempts failed")
+                return None, None, None, None, None, None
 
-    a, delta, x, y, yaw, v = None, None, None, None, None, None
-
-    if prob.status == cvxpy.OPTIMAL or \
-            prob.status == cvxpy.OPTIMAL_INACCURATE:
+    if prob.status in [cvxpy.OPTIMAL, cvxpy.OPTIMAL_INACCURATE]:
         x = z.value[0, :]
         y = z.value[1, :]
         v = z.value[2, :]
         yaw = z.value[3, :]
         a = u.value[0, :]
         delta = u.value[1, :]
+        return a, delta, x, y, yaw, v
     else:
-        print("Cannot solve linear mpc!")
-
-    return a, delta, x, y, yaw, v
+        print(f"Optimization failed with status: {prob.status}")
+        return None, None, None, None, None, None
 
 
 def calc_speed_profile(cx, cy, cyaw, target_speed):
@@ -391,46 +434,95 @@ def pi_2_pi(angle):
 
 
 class MPCController:
-    def __init__(self, ref_path, target_speed):
-        self.ref_path = ref_path
+    def __init__(self, target_speed, initial_state):
+        self.ref_path = None
         self.target_speed = target_speed
-        self.node = Node(x=ref_path.cx[0], y=ref_path.cy[0], yaw=ref_path.cyaw[0], v=0.0)
+        self.node = Node(
+            x=initial_state[0], y=initial_state[1], yaw=initial_state[2], v=initial_state[3])
         # self.obstacles = obstacles if obstacles is not None else []
-        self.x, self.y, self.yaw, self.v, self.t, self.d, self.a = ([self.node.x], 
-                                                                [self.node.y], 
-                                                                [self.node.yaw], 
-                                                                [self.node.v], 
-                                                                [0.0], 
-                                                                [0.0], 
-                                                                [0.0])
+        self.x, self.y, self.yaw, self.v, self.t, self.d, self.a = ([self.node.x],
+                                                                    [self.node.y],
+                                                                    [self.node.yaw],
+                                                                    [self.node.v],
+                                                                    [0.0],
+                                                                    [0.0],
+                                                                    [0.0])
         self.delta_opt, self.a_opt = None, None
         self.a_exc, self.delta_exc = 0.0, 0.0
 
-    def update(self):
-        z_ref, target_ind = calc_ref_trajectory_in_T_step(self.node, self.ref_path, 
-                                                           calc_speed_profile(self.ref_path.cx, 
-                                                                              self.ref_path.cy, 
-                                                                              self.ref_path.cyaw, 
-                                                                              self.target_speed))
+    def update(self, ref_path, initial_state=None):
+        if ref_path is None or len(ref_path.cx) < 2:
+            print("Invalid reference path")
+            return None, None, None, None, None
+            
+        # 检查参考路径的连续性
+        path_dists = np.sqrt(np.diff(ref_path.cx)**2 + np.diff(ref_path.cy)**2)
+        if np.any(path_dists < 1e-6):
+            print("Warning: Reference path contains very close points")
+            
+        self.ref_path = ref_path
+        if initial_state is not None:
+            self.node = Node(
+                x=initial_state[0], y=initial_state[1], yaw=initial_state[2], v=initial_state[3])
+        
+        try:
+            z_ref, target_ind = calc_ref_trajectory_in_T_step(self.node, self.ref_path,
+                                                            calc_speed_profile(self.ref_path.cx,
+                                                                            self.ref_path.cy,
+                                                                            self.ref_path.cyaw,
+                                                                            self.target_speed))
 
-        z0 = [self.node.x, self.node.y, self.node.v, self.node.yaw]
+            # 检查参考轨迹的有效性
+            if np.any(np.isnan(z_ref)):
+                raise ValueError("Reference trajectory contains NaN values")
+                
+            z0 = [self.node.x, self.node.y, self.node.v, self.node.yaw]
+        
+        except Exception as e:
+            print(f"MPC update failed: {str(e)}")
+            return None, None, None, None, None
+        
+        try:
+            self.a_opt, self.delta_opt, x_opt, y_opt, yaw_opt, v_opt = linear_mpc_control(z_ref, z0,
+                                                                                    self.a_opt,
+                                                                                    self.delta_opt)
+            
+            if self.delta_opt is not None:
+                self.delta_exc, self.a_exc = self.delta_opt[0], self.a_opt[0]
+            else:
+                # 如果优化失败，使用上一步的控制输入或安全的默认值
+                print("Using fallback control")
+                self.delta_exc = self.delta_exc if hasattr(self, 'delta_exc') else 0.0
+                self.a_exc = self.a_exc if hasattr(self, 'a_exc') else 0.0
+                
+            # 限制控制输入的变化率
+            self.a_exc = np.clip(self.a_exc, -P.acceleration_max, P.acceleration_max)
+            self.delta_exc = np.clip(self.delta_exc, -P.steer_max, P.steer_max)
 
-        self.a_opt, self.delta_opt, x_opt, y_opt, yaw_opt, v_opt = linear_mpc_control(z_ref, z0, 
-                                                                                     self.a_opt, 
-                                                                                     self.delta_opt)
-        if self.delta_opt is not None:
-            self.delta_exc, self.a_exc = self.delta_opt[0], self.a_opt[0]
-
-        print(self.a_exc, self.delta_exc)
-        self.node.update(self.a_exc, self.delta_exc, 1.0)
-
-        # 更新记录
-        self.x.append(self.node.x)
-        self.y.append(self.node.y)
-        self.yaw.append(self.node.yaw)
-        self.v.append(self.node.v)
-
-        return target_ind, x_opt, y_opt, yaw_opt, v_opt  # 返回目标索引和优化路径以用于绘图
+            self.node.update(self.a_exc, self.delta_exc, 1.0)
+            
+            # 更新记录
+            self.x.append(self.node.x)
+            self.y.append(self.node.y)
+            self.yaw.append(self.node.yaw)
+            self.v.append(self.node.v)
+            
+            return target_ind, x_opt, y_opt, yaw_opt, v_opt
+            
+        except Exception as e:
+            print(f"MPC update failed: {str(e)}")
+            # 使用简单的故障安全控制
+            self.delta_exc = 0.0
+            self.a_exc = -0.1  # 轻微减速
+            self.node.update(self.a_exc, self.delta_exc, 1.0)
+            
+            # 仍然更新记录
+            self.x.append(self.node.x)
+            self.y.append(self.node.y)
+            self.yaw.append(self.node.yaw)
+            self.v.append(self.node.v)
+            
+            return target_ind, None, None, None, None
 
 
 def main():

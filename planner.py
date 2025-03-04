@@ -4,7 +4,8 @@ import matplotlib.pyplot as plt
 import csv
 import rospy
 from path_handling import load_splines, SplinePath, find_best_s, get_path_obj
-from MotionPlanning.Control.MPC_XY_Frame import P, Node
+from MotionPlanning.Control.MPC_XY_Frame import *
+from MotionPlanning.CurvesGenerator.cubic_spline import cs
 from common_msgs.msg import actuator
 from common_msgs.msg import hdmap
 from common_msgs.msg import hdroutetoglobal
@@ -39,27 +40,6 @@ def xy_to_latlon_batch(lon_origin, lat_origin, x_array, y_array):
     )
     return lon_array, lat_array
 
-# 优化距离计算
-@numba.jit(nopython=True)
-def calc_distance_batch(lon1_array, lat1_array, lon2_array, lat2_array):
-    """使用Numba加速批量计算距离"""
-    R = 6371000  # 地球半径(米)
-    phi1 = np.radians(lat1_array)
-    phi2 = np.radians(lat2_array)
-    delta_phi = np.radians(lat2_array - lat1_array)
-    delta_lambda = np.radians(lon2_array - lon1_array)
-    
-    a = np.sin(delta_phi/2)**2 + \
-        np.cos(phi1) * np.cos(phi2) * \
-        np.sin(delta_lambda/2)**2
-    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
-    return R * c
-# 全局变量存储参考线信息
-ref_lons = []
-ref_lats = []
-ref_s = []
-vehicle_init_pos = None  # 存储车辆初始位置的全局变量
-
 def coordinate_transform(x, y, target_heading=320):
     """
     将坐标系进行旋转变换
@@ -91,9 +71,30 @@ def coordinate_transform(x, y, target_heading=320):
     rotated_points = np.dot(points, rotation_matrix.T)
     new_x = rotated_points[:, 0] + x[0]
     new_y = rotated_points[:, 1] + y[0]
-
-    
+   
     return new_x, new_y
+
+# 优化距离计算
+@numba.jit(nopython=True)
+def calc_distance_batch(lon1_array, lat1_array, lon2_array, lat2_array):
+    """使用Numba加速批量计算距离"""
+    R = 6371000  # 地球半径(米)
+    phi1 = np.radians(lat1_array)
+    phi2 = np.radians(lat2_array)
+    delta_phi = np.radians(lat2_array - lat1_array)
+    delta_lambda = np.radians(lon2_array - lon1_array)
+    
+    a = np.sin(delta_phi/2)**2 + \
+        np.cos(phi1) * np.cos(phi2) * \
+        np.sin(delta_lambda/2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    return R * c
+# 全局变量存储参考线信息
+ref_lons = []
+ref_lats = []
+ref_s = []
+vehicle_init_pos = None  # 存储车辆初始位置的全局变量
+mpc_controller = None
 
 def init_reference_path(reference_data):
     """初始化参考线信息并计算累计距离s值"""
@@ -152,25 +153,7 @@ def calc_distance(lon1, lat1, lon2, lat2):
         np.sin(delta_lambda/2) * np.sin(delta_lambda/2)
     c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
     return R * c
-# def calc_distance(lon1, lat1, lon2, lat2):
-#     """计算两点之间的距离"""
-#     # 使用Haversine公式计算球面距离
-#     R = 6371000  # 地球半径，单位米
-    
-#     # 转换为弧度
-#     lat1_rad = np.radians(lat1)
-#     lon1_rad = np.radians(lon1)
-#     lat2_rad = np.radians(lat2)
-#     lon2_rad = np.radians(lon2)
-    
-#     # Haversine公式
-#     dlon = lon2_rad - lon1_rad
-#     dlat = lat2_rad - lat1_rad
-#     a = np.sin(dlat/2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon/2)**2
-#     c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
-#     distance = R * c
-    
-    return distance
+
 def xy_to_latlon(lon_origin, lat_origin, x, y):
 
     proj_string = "+proj=tmerc +lon_0=" + str(lon_origin) + " +lat_0=" + str(lat_origin) + " +ellps=WGS84"
@@ -203,21 +186,18 @@ def bag_plan(bag_data, t, ego_plan, ego_decision):
 
     return ego_plan, ego_decision
 
-def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
+def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False):
     """
-    基于当前状态数据和参考线数据生成规划轨迹和决策
+    CACS规划算法主函数
     
     Args:
         state_data: 车辆当前状态数据
         reference_data: 参考线数据
-        ego_plan: 规划轨迹消息对象
-        ego_decision: 决策消息对象
-        
-    Returns:
-        ego_plan: 更新后的规划轨迹消息
-        ego_decision: 更新后的决策消息
+        ego_plan: 规划结果
+        ego_decision: 决策结果
+        use_mpc: 是否使用MPC生成轨迹，默认为False
     """
-    global ref_lons, ref_lats, ref_s, vehicle_init_pos
+    global ref_lons, ref_lats, ref_s, vehicle_init_pos, mpc_controller
     
     # 深拷贝输入数据，避免修改原始数据
     DataFromEgo = copy.deepcopy(state_data)
@@ -242,19 +222,26 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     # 初始化车辆初始位置（仅在第一次规划时）
     if vehicle_init_pos is None:
         vehicle_init_pos = current_pos
-        rospy.loginfo(f"Vehicle initial position set to: {vehicle_init_pos}")
+        rospy.loginfo(f"Vehicle initial position set to: {vehicle_init_pos}") 
+   
+    # 根据选择的方法生成局部坐标系下的轨迹
+    if use_mpc and ref_lons and ref_lats and ref_s:
+        # 将参考线转换为局部坐标系
+        local_ref_path = convert_reference_to_local(ego_state, ref_lons, ref_lats)
+        
+        # 使用MPC生成局部坐标系下的轨迹
+        x_local, y_local, yaw_local, v_local = generate_mpc_trajectory(ego_state, local_ref_path)
+    else:
+        # 使用简单的匀加速模型生成局部坐标系下的轨迹
+        time_steps = 50
+        a = 2  # 加速度
+        delta = 0  # 转向角
+        x_local, y_local, yaw_local, v_local = generate_trajectory(ego_state, time_steps, a, delta)
     
-    # 1. 基于车辆坐标系生成粗线条轨迹
-    time_steps = 50
-    a = 2  # 加速度
-    delta = 0  # 转向角
-    
-    x_local, y_local, yaw_local, v_local = generate_trajectory(ego_state, time_steps, a, delta)
-    
-    # 2. 在车辆坐标系下对轨迹进行加密
+    # 统一进行轨迹加密
     x_local_dense, y_local_dense, yaw_local_dense = densify_trajectory(x_local, y_local, yaw_local, max_distance=20)
     
-    # 3. 将加密后的轨迹从车辆坐标系旋转到全局坐标系
+    # 统一将加密后的轨迹从车辆坐标系旋转到全局坐标系
     x_global_dense, y_global_dense = coordinate_transform(x_local_dense, y_local_dense, target_heading=ego_state.heading)
     
     # 计算全局航向角
@@ -321,7 +308,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     base_point.speed = 15
     base_point.roadtype = 2
     base_point.turnlight = 0
-    base_point.a = a
+    base_point.a = 2
     base_point.jerk = 0
     base_point.lanewidth = 0
     
@@ -358,8 +345,183 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision):
     rospy.loginfo("Generated trajectory with {} points".format(len(trajectory_points)))
     
     return ego_plan, ego_decision
+    
+def convert_reference_to_local(ego_state, ref_lons, ref_lats):
+    """
+    将全局经纬度参考线转换为车辆局部坐标系下的参考线
+    
+    参数:
+        ego_state: 车辆当前状态
+        ref_lons: 参考线经度列表
+        ref_lats: 参考线纬度列表
+    
+    返回:
+        local_ref_path: 局部坐标系下的参考路径对象
+    """
+    
+    # 创建局部坐标系下的参考线点
+    ref_x_local = []
+    ref_y_local = []
+    
+    # 获取车辆当前位置的投影变换器
+    transformer, proj = get_transformer(ego_state.gx, ego_state.gy)
+    x0, y0 = proj(ego_state.gx, ego_state.gy)
+    
+    # 将经纬度参考线转换为平面坐标系（与xy_to_latlon_batch的逆过程）
+    x_global, y_global = transformer.transform(ref_lons, ref_lats)
+    x_global -= x0
+    y_global -= y0
+    
+    # 将平面坐标转换为车辆局部坐标系（与coordinate_transform的逆过程）
+    theta = np.radians(ego_state.heading)
+    
+    # 创建旋转矩阵（逆向旋转）
+    rotation_matrix = np.array([
+        [np.cos(theta), -np.sin(theta)],
+        [np.sin(theta), np.cos(theta)]
+    ])
+    
+    # 进行坐标变换
+    for i in range(len(x_global)):
+        # 相对于车辆位置的偏移
+        dx = x_global[i] * 100  # 转换为厘米
+        dy = y_global[i] * 100  # 转换为厘米
+        
+        # 旋转到车辆坐标系
+        point = np.array([dx, dy])
+        rotated_point = np.dot(rotation_matrix, point)
+        
+        ref_x_local.append(rotated_point[0])
+        ref_y_local.append(rotated_point[1])
+    
+    # 使用样条曲线平滑参考线
+    try:
+        cx, cy, cyaw, ck, s = cs.calc_spline_course(
+            ref_x_local, ref_y_local, ds=P.d_dist)
+    except Exception as e:
+        rospy.logerr(f"Error calculating spline course: {e}")
+        # 如果样条曲线计算失败，直接使用原始点
+        cx = ref_x_local
+        cy = ref_y_local
+        
+        # 计算航向角
+        cyaw = []
+        for i in range(len(cx)):
+            if i == 0:
+                yaw = math.atan2(cy[1] - cy[0], cx[1] - cx[0])
+            elif i == len(cx) - 1:
+                yaw = math.atan2(cy[i] - cy[i-1], cx[i] - cx[i-1])
+            else:
+                yaw = math.atan2(cy[i+1] - cy[i-1], cx[i+1] - cx[i-1]) / 2.0
+            cyaw.append(yaw)
+        
+        # 简单计算曲率
+        ck = [0.0] * len(cx)
+        s = np.zeros(len(cx))
+        for i in range(1, len(cx)):
+            s[i] = s[i-1] + math.sqrt((cx[i] - cx[i-1])**2 + (cy[i] - cy[i-1])**2)
+    
+    # 创建参考路径对象
+    local_ref_path = PATH(cx, cy, cyaw, ck)
+    
+    return local_ref_path
 
-# 辅助函数
+# def convert_reference_to_local(ego_state, ref_lons, ref_lats):
+#     """
+#     将全局经纬度参考线转换为车辆局部坐标系下的参考线
+    
+#     参数:
+#         ego_state: 车辆当前状态
+#         ref_lons: 参考线经度列表
+#         ref_lats: 参考线纬度列表
+    
+#     返回:
+#         local_ref_path: 局部坐标系下的参考路径对象
+#     """
+#     from MotionPlanning.Control.MPC_XY_Frame import PATH
+    
+#     # 创建局部坐标系下的参考线
+#     cx = []
+#     cy = []
+#     cyaw = []
+#     ck = []
+    
+#     # 将经纬度参考线转换为局部坐标系
+#     for i in range(len(ref_lons)):
+#         # 计算相对于车辆当前位置的局部坐标（米）
+#         dx, dy = latlon_to_xy(ego_state.gx, ego_state.gy, ref_lons[i], ref_lats[i])
+#         dx *= 100  # 转换为厘米
+#         dy *= 100  # 转换为厘米
+        
+#         # 旋转到车辆坐标系
+#         ref_x_local, ref_y_local = rotate_point(dx, dy, -np.radians(ego_state.heading - 90))
+
+#         cx, cy, cyaw, ck, s = cs.calc_spline_course(ref_x_local, ref_y_local, P.dist)
+    
+#     # 创建参考路径对象
+#     local_ref_path = PATH(cx, cy, cyaw, ck)
+    
+#     return local_ref_path
+
+def generate_mpc_trajectory(ego_state, local_ref_path):
+    """
+    使用MPC控制器生成局部坐标系下的轨迹
+    
+    参数:
+        ego_state: 车辆当前状态
+        local_ref_path: 局部坐标系下的参考路径
+    
+    返回:
+        x_local: 局部坐标系下的x坐标
+        y_local: 局部坐标系下的y坐标
+        yaw_local: 局部坐标系下的航向角
+        v_local: 速度
+    """
+    global mpc_controller
+    
+    # 在局部坐标系中，车辆位置为原点
+    initial_state = [0, 0, ego_state.yaw, ego_state.v]
+    
+    # 如果MPC控制器未初始化，则初始化
+    if mpc_controller is None:    
+        # 初始化MPC控制器
+        mpc_controller = MPCController(P.target_speed, initial_state)
+        rospy.loginfo("MPC controller initialized")
+    
+    # 使用MPC控制器生成轨迹
+    try:
+        target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state)
+        
+        if x_opt is None or y_opt is None or yaw_opt is None or v_opt is None:
+            rospy.logwarn("MPC optimization failed, falling back to simple trajectory")
+            # 如果MPC优化失败，使用简单轨迹
+            return fallback_trajectory(ego_state)
+        
+        # 将MPC预测轨迹转换为数组格式
+        x_local = np.array(x_opt)
+        y_local = np.array(y_opt)
+        yaw_local = np.array(yaw_opt)
+        v_local = np.array(v_opt)
+        
+        return x_local, y_local, yaw_local, v_local
+        
+    except Exception as e:
+        rospy.logerr(f"Error in MPC trajectory generation: {e}")
+        return fallback_trajectory(ego_state)
+
+def fallback_trajectory(ego_state):
+    """
+    当MPC失败时的备用轨迹生成方法
+    
+    返回局部坐标系下的轨迹
+    """
+    time_steps = 50
+    a = 2  # 加速度
+    delta = 0  # 转向角
+    
+    x_local, y_local, yaw_local, v_local = generate_trajectory(ego_state, time_steps, a, delta)
+    
+    return x_local, y_local, yaw_local, v_local
 
 def generate_trajectory(ego_state, time_steps=50, a=2, delta=0):
     """生成基于车辆坐标系的粗线条轨迹"""

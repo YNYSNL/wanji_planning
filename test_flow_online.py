@@ -128,8 +128,8 @@ def cal_action(sensor_data, reference_data):
     ego_plan = planningmotion()
     ego_decision = decisionbehavior()
     ego_plan.points = roadpoint()
-
-    ego_plan, ego_decision = CACS_plan(sensor_data, reference_data, ego_plan, ego_decision)
+    use_mpc = True
+    ego_plan, ego_decision = CACS_plan(sensor_data, reference_data, ego_plan, ego_decision, use_mpc)
 # 
     # global bag_data
     # global bag_time
