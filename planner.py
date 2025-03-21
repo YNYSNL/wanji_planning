@@ -5,7 +5,7 @@ import csv
 import rospy
 from path_handling import load_splines, SplinePath, find_best_s, get_path_obj
 from MotionPlanning.Control.MPC_XY_Frame import *
-from MotionPlanning.CurvesGenerator.cubic_spline import cs
+import MotionPlanning.CurvesGenerator.cubic_spline as cs
 from common_msgs.msg import actuator
 from common_msgs.msg import hdmap
 from common_msgs.msg import hdroutetoglobal
@@ -366,11 +366,13 @@ def convert_reference_to_local(ego_state, ref_lons, ref_lats):
     # 获取车辆当前位置的投影变换器
     transformer, proj = get_transformer(ego_state.gx, ego_state.gy)
     x0, y0 = proj(ego_state.gx, ego_state.gy)
+    ref_lons_array = np.array(ref_lons)
+    ref_lats_array = np.array(ref_lats)
     
     # 将经纬度参考线转换为平面坐标系（与xy_to_latlon_batch的逆过程）
-    x_global, y_global = transformer.transform(ref_lons, ref_lats)
-    x_global -= x0
-    y_global -= y0
+    x_global, y_global = transformer.transform(ref_lons_array, ref_lats_array)
+    x_global = np.array(x_global)-x0
+    y_global = np.array(y_global)-y0
     
     # 将平面坐标转换为车辆局部坐标系（与coordinate_transform的逆过程）
     theta = np.radians(ego_state.heading)
