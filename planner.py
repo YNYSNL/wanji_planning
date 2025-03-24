@@ -354,125 +354,138 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
     
 def convert_reference_to_local(ego_state, ref_lons, ref_lats):
     """
-    将全局经纬度参考线转换为车辆局部坐标系下的参考线
+    convert global latitude and longitude reference line to vehicle local coordinate system reference line
     
-    参数:
-        ego_state: 车辆当前状态
-        ref_lons: 参考线经度列表
-        ref_lats: 参考线纬度列表
+    Args:
+        ego_state: current vehicle state
+        ref_lons: reference line longitude list
+        ref_lats: reference line latitude list
     
-    返回:
-        local_ref_path: 局部坐标系下的参考路径对象
+    Returns:
+        local_ref_path: reference path object in local coordinate system
     """
+     
+    # 确保有足够的参考点
+    if len(ref_lons) < 10 or len(ref_lats) < 10:
+        rospy.logwarn(f"Not enough reference points: {len(ref_lons)}")
+        return create_default_path()
     
-    # 创建局部坐标系下的参考线点
-    ref_x_local = []
-    ref_y_local = []
+    # 1. 经纬度坐标系 -> 大地坐标系
+    # 创建以车辆位置为中心的投影
+    proj_string = f"+proj=tmerc +lon_0={ego_state.gx} +lat_0={ego_state.gy} +ellps=WGS84"
+    proj = Proj(proj_string)
     
-    # 获取车辆当前位置的投影变换器
-    transformer, proj = get_transformer(ego_state.gx, ego_state.gy)
+    # 获取车辆位置在投影坐标系中的坐标
     x0, y0 = proj(ego_state.gx, ego_state.gy)
-    ref_lons_array = np.array(ref_lons)
-    ref_lats_array = np.array(ref_lats)
     
-    # 将经纬度参考线转换为平面坐标系（与xy_to_latlon_batch的逆过程）
-    x_global, y_global = transformer.transform(ref_lons_array, ref_lats_array)
+    # 将参考线点批量转换为投影坐标系
+    x_global, y_global = proj(np.array(ref_lons), np.array(ref_lats))
     
-    # 转换为numpy数组后再进行减法操作
-    x_global = np.array(x_global) - x0
-    y_global = np.array(y_global) - y0
+    # 相对于车辆位置的坐标
+    x_global = x_global - x0
+    y_global = y_global - y0
     
-    # 将平面坐标转换为车辆局部坐标系（与coordinate_transform的逆过程）
+    # 2. 大地坐标系 -> 车身局部坐标系
+    # 注意：heading是车辆朝向与正北方向的夹角
     theta = np.radians(ego_state.heading)
     
-    # 创建旋转矩阵（逆向旋转）
-    rotation_matrix = np.array([
-        [np.cos(theta), -np.sin(theta)],
+    # 创建旋转矩阵（与coordinate_transform中的矩阵互逆）
+    # 注意：这里不使用转置操作，直接定义逆旋转矩阵
+    rotation_matrix_inv = np.array([
+        [np.cos(theta), -np.sin(theta)], 
         [np.sin(theta), np.cos(theta)]
     ])
     
-    # 批量进行坐标变换以提高效率
-    points = np.column_stack((x_global * 100, y_global * 100))  # 转换为厘米
-    rotated_points = np.dot(points, rotation_matrix.T)
+    # 批量进行坐标变换（转换为厘米）
+    points = np.column_stack((x_global * 100, y_global * 100))
+    rotated_points = np.dot(points, rotation_matrix_inv)
     
     ref_x_local = rotated_points[:, 0]
     ref_y_local = rotated_points[:, 1]
     
-    # 选择参考线上的一段合适长度的路径
-    # 找到距离车辆最近的点
-    distances = np.sqrt(ref_x_local**2 + ref_y_local**2)
-    min_idx = np.argmin(distances)
+    # 选择车辆前方的点（y > 0）
+    front_indices = np.where(ref_y_local > 0)[0]
+    if len(front_indices) < 10:
+        rospy.logwarn(f"Not enough points in front of vehicle: {len(front_indices)}")
+        return create_default_path()
     
-    # 选择前后各500个点，总共最多1001个点
-    start_idx = max(0, min_idx - 500)
-    end_idx = min(len(ref_x_local), min_idx + 500)
+    # 在前方点中找到最近的点
+    front_x = ref_x_local[front_indices]
+    front_y = ref_y_local[front_indices]
+    front_distances = np.sqrt(front_x**2 + front_y**2)
+    min_front_idx = np.argmin(front_distances)
+    
+    # 选择前后各250个点
+    start_idx = max(0, front_indices[min_front_idx] - 100)
+    end_idx = min(len(ref_x_local), front_indices[min_front_idx] + 400)
     
     # 确保有足够的点
     if end_idx - start_idx < 10:
         rospy.logwarn(f"Not enough points in range: {end_idx - start_idx}")
-        # 创建一个简单的直线路径
-        cx = np.array([0, 50, 100, 150, 200, 250, 300])  # 沿车辆前方的直线
-        cy = np.array([0, 0, 0, 0, 0, 0, 0])             # 车辆中心线
-        cyaw = np.array([0, 0, 0, 0, 0, 0, 0])           # 与车辆方向一致
-        ck = np.array([0, 0, 0, 0, 0, 0, 0])             # 无曲率
-        local_ref_path = PATH(cx, cy, cyaw, ck)
-
-        return local_ref_path
+        return create_default_path()
     
+    # 提取选定的点
     selected_x = ref_x_local[start_idx:end_idx]
     selected_y = ref_y_local[start_idx:end_idx]
     
-    # 对选择的点进行降采样，每隔n个点取一个
-    sample_rate = max(1, len(selected_x) // 100)  # 最多取100个点
+    # 降采样
+    sample_rate = max(1, len(selected_x) // 100)
     selected_x = selected_x[::sample_rate]
     selected_y = selected_y[::sample_rate]
     
     # 确保点的间距不为零
-    valid_x = []
-    valid_y = []
+    valid_x, valid_y = filter_points(selected_x, selected_y)
     
-    if len(selected_x) > 0:
-        valid_x.append(selected_x[0])
-        valid_y.append(selected_y[0])
-        
-        for i in range(1, len(selected_x)):
-            dist = math.sqrt((selected_x[i] - valid_x[-1])**2 + (selected_y[i] - valid_y[-1])**2)
-            if dist > 10.0:  # 最小间距为10厘米
-                valid_x.append(selected_x[i])
-                valid_y.append(selected_y[i])
-    
-    # 如果有效点太少，添加一些人工点
+    # 如果有效点太少，使用默认路径
     if len(valid_x) < 4:
-        rospy.logwarn(f"Too few valid points ({len(valid_x)}), adding artificial points")
-        # 创建一个简单的直线路径
-        cx = np.array([0, 50, 100, 150, 200, 250, 300])  # 沿车辆前方的直线
-        cy = np.array([0, 0, 0, 0, 0, 0, 0])             # 车辆中心线
-        cyaw = np.array([0, 0, 0, 0, 0, 0, 0])           # 与车辆方向一致
-        ck = np.array([0, 0, 0, 0, 0, 0, 0])             # 无曲率
-    else:
-        try:
-            # 使用有效点计算样条曲线
-            cx, cy, cyaw, ck, s = cs.calc_spline_course(
-                valid_x, valid_y, ds=P.d_dist)
-            
-            # 检查结果是否包含NaN值
-            if np.isnan(np.sum(cx)) or np.isnan(np.sum(cy)) or np.isnan(np.sum(cyaw)) or np.isnan(np.sum(ck)):
-                rospy.logwarn("Spline calculation produced NaN values, using simple path")
-                cx = np.array([0, 50, 100, 150, 200, 250, 300])  # 沿车辆前方的直线
-                cy = np.array([0, 0, 0, 0, 0, 0, 0])             # 车辆中心线
-                cyaw = np.array([0, 0, 0, 0, 0, 0, 0])           # 与车辆方向一致
-                ck = np.array([0, 0, 0, 0, 0, 0, 0])             # 无曲率
-        except Exception as e:
-            rospy.logerr(f"Error calculating spline course: {e}")
-            # 如果样条曲线计算失败，使用简单路径
-            cx = np.array([0, 50, 100, 150, 200, 250, 300])  # 沿车辆前方的直线
-            cy = np.array([0, 0, 0, 0, 0, 0, 0])             # 车辆中心线
-            cyaw = np.array([0, 0, 0, 0, 0, 0, 0])           # 与车辆方向一致
-            ck = np.array([0, 0, 0, 0, 0, 0, 0])             # 无曲率
+        rospy.logwarn(f"Too few valid points ({len(valid_x)}), using default path")
+        return create_default_path()
+    
+    # 计算样条曲线
+    try:
+        cx, cy, cyaw, ck, s = cs.calc_spline_course(valid_x, valid_y, ds=P.d_dist)
+        
+        # 检查结果是否包含NaN值
+        if np.isnan(np.sum(cx)) or np.isnan(np.sum(cy)) or np.isnan(np.sum(cyaw)) or np.isnan(np.sum(ck)):
+            rospy.logwarn("Spline calculation produced NaN values, using default path")
+            return create_default_path()
+    except Exception as e:
+        rospy.logerr(f"Error calculating spline course: {e}")
+        return create_default_path()
     
     # 创建参考路径对象
     local_ref_path = PATH(cx, cy, cyaw, ck)
+    
     return local_ref_path
+
+def create_default_path():
+    """create default path"""
+    from MotionPlanning.Control.MPC_XY_Frame import PATH
+    
+    # 沿车辆前方的直线
+    cx = np.array([0, 0, 0, 0, 0, 0, 0])
+    cy = np.array([0, 50, 100, 150, 200, 250, 300])
+    cyaw = np.array([np.pi/2, np.pi/2, np.pi/2, np.pi/2, np.pi/2, np.pi/2, np.pi/2])
+    ck = np.array([0, 0, 0, 0, 0, 0, 0])
+    
+    return PATH(cx, cy, cyaw, ck)
+
+def filter_points(x, y, min_dist=10.0):
+    """filter points with small distance"""
+    valid_x = []
+    valid_y = []
+    
+    if len(x) > 0:
+        valid_x.append(x[0])
+        valid_y.append(y[0])
+        
+        for i in range(1, len(x)):
+            dist = np.sqrt((x[i] - valid_x[-1])**2 + (y[i] - valid_y[-1])**2)
+            if dist > min_dist:
+                valid_x.append(x[i])
+                valid_y.append(y[i])
+    
+    return np.array(valid_x), np.array(valid_y)
 
 def generate_mpc_trajectory(ego_state, local_ref_path):
     """
@@ -522,9 +535,9 @@ def generate_mpc_trajectory(ego_state, local_ref_path):
 
 def fallback_trajectory(ego_state):
     """
-    当MPC失败时的备用轨迹生成方法
+    fallback trajectory generation method when MPC fails
     
-    返回局部坐标系下的轨迹
+    return local coordinate trajectory
     """
     time_steps = 50
     a = 2  # 加速度
@@ -535,7 +548,7 @@ def fallback_trajectory(ego_state):
     return x_local, y_local, yaw_local, v_local
 
 def generate_trajectory(ego_state, time_steps=50, a=2, delta=0):
-    """生成基于车辆坐标系的粗线条轨迹"""
+    """generate coarse trajectory based on vehicle coordinate system"""
     # 创建车辆状态的副本，避免修改原始状态
     vehicle_state = copy.deepcopy(ego_state)
     
@@ -562,7 +575,7 @@ def generate_trajectory(ego_state, time_steps=50, a=2, delta=0):
     return x, y, yaw, v
 
 def densify_trajectory(x, y, yaw, max_distance=20):
-    """对轨迹进行加密，确保相邻点距离不超过指定值（向量化实现）"""
+    """densify trajectory to ensure the distance between adjacent points does not exceed a specified value (vectorized implementation)"""
     # 计算所有相邻点之间的距离
     points = np.column_stack((x, y))
     diff = np.diff(points, axis=0)
