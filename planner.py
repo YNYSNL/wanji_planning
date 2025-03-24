@@ -391,92 +391,87 @@ def convert_reference_to_local(ego_state, ref_lons, ref_lats):
         [np.sin(theta), np.cos(theta)]
     ])
     
-    # 进行坐标变换
-    for i in range(len(x_global)):
-        # 相对于车辆位置的偏移
-        dx = x_global[i] * 100  # 转换为厘米
-        dy = y_global[i] * 100  # 转换为厘米
-        
-        # 旋转到车辆坐标系
-        point = np.array([dx, dy])
-        rotated_point = np.dot(rotation_matrix, point)
-        
-        ref_x_local.append(rotated_point[0])
-        ref_y_local.append(rotated_point[1])
+    # 批量进行坐标变换以提高效率
+    points = np.column_stack((x_global * 100, y_global * 100))  # 转换为厘米
+    rotated_points = np.dot(points, rotation_matrix.T)
     
-    # 选择参考线上的一段合适长度的路径（避免处理过长的参考线）
+    ref_x_local = rotated_points[:, 0]
+    ref_y_local = rotated_points[:, 1]
+    
+    # 选择参考线上的一段合适长度的路径
     # 找到距离车辆最近的点
-    distances = [math.sqrt(x**2 + y**2) for x, y in zip(ref_x_local, ref_y_local)]
-    min_idx = distances.index(min(distances))
+    distances = np.sqrt(ref_x_local**2 + ref_y_local**2)
+    min_idx = np.argmin(distances)
     
-    # 选择前后各100个点，总共最多201个点
-    start_idx = max(0, min_idx - 100)
-    end_idx = min(len(ref_x_local), min_idx + 100)
+    # 选择前后各500个点，总共最多1001个点
+    start_idx = max(0, min_idx - 500)
+    end_idx = min(len(ref_x_local), min_idx + 500)
+    
+    # 确保有足够的点
+    if end_idx - start_idx < 10:
+        rospy.logwarn(f"Not enough points in range: {end_idx - start_idx}")
+        # 创建一个简单的直线路径
+        cx = np.array([0, 50, 100, 150, 200, 250, 300])  # 沿车辆前方的直线
+        cy = np.array([0, 0, 0, 0, 0, 0, 0])             # 车辆中心线
+        cyaw = np.array([0, 0, 0, 0, 0, 0, 0])           # 与车辆方向一致
+        ck = np.array([0, 0, 0, 0, 0, 0, 0])             # 无曲率
+        local_ref_path = PATH(cx, cy, cyaw, ck)
+
+        return local_ref_path
     
     selected_x = ref_x_local[start_idx:end_idx]
     selected_y = ref_y_local[start_idx:end_idx]
     
-    # 确保有足够的点进行样条曲线拟合
-    if len(selected_x) < 4:
-        rospy.logerr("Not enough points for spline fitting")
-        # 创建一个简单的直线路径
-        cx = [0, 100, 200, 300]  # 沿车辆前方的直线
-        cy = [0, 0, 0, 0]        # 车辆中心线
-        cyaw = [0, 0, 0, 0]      # 与车辆方向一致
-        ck = [0, 0, 0, 0]        # 无曲率
-        local_ref_path = PATH(cx, cy, cyaw, ck)
-        return local_ref_path
+    # 对选择的点进行降采样，每隔n个点取一个
+    sample_rate = max(1, len(selected_x) // 100)  # 最多取100个点
+    selected_x = selected_x[::sample_rate]
+    selected_y = selected_y[::sample_rate]
     
-    # 使用样条曲线平滑参考线
-    try:
-        # 确保点的间距不为零
-        valid_indices = []
-        last_valid_x = selected_x[0]
-        last_valid_y = selected_y[0]
-        valid_indices.append(0)
+    # 确保点的间距不为零
+    valid_x = []
+    valid_y = []
+    
+    if len(selected_x) > 0:
+        valid_x.append(selected_x[0])
+        valid_y.append(selected_y[0])
         
         for i in range(1, len(selected_x)):
-            dist = math.sqrt((selected_x[i] - last_valid_x)**2 + (selected_y[i] - last_valid_y)**2)
-            if dist > 1.0:  # 最小间距为1厘米
-                valid_indices.append(i)
-                last_valid_x = selected_x[i]
-                last_valid_y = selected_y[i]
-        
-        # 如果有效点太少，添加一些人工点
-        if len(valid_indices) < 4:
-            rospy.logwarn(f"Too few valid points ({len(valid_indices)}), adding artificial points")
-            cx = [0, 100, 200, 300]  # 沿车辆前方的直线
-            cy = [0, 0, 0, 0]        # 车辆中心线
-            cyaw = [0, 0, 0, 0]      # 与车辆方向一致
-            ck = [0, 0, 0, 0]        # 无曲率
-        else:
+            dist = math.sqrt((selected_x[i] - valid_x[-1])**2 + (selected_y[i] - valid_y[-1])**2)
+            if dist > 10.0:  # 最小间距为10厘米
+                valid_x.append(selected_x[i])
+                valid_y.append(selected_y[i])
+    
+    # 如果有效点太少，添加一些人工点
+    if len(valid_x) < 4:
+        rospy.logwarn(f"Too few valid points ({len(valid_x)}), adding artificial points")
+        # 创建一个简单的直线路径
+        cx = np.array([0, 50, 100, 150, 200, 250, 300])  # 沿车辆前方的直线
+        cy = np.array([0, 0, 0, 0, 0, 0, 0])             # 车辆中心线
+        cyaw = np.array([0, 0, 0, 0, 0, 0, 0])           # 与车辆方向一致
+        ck = np.array([0, 0, 0, 0, 0, 0, 0])             # 无曲率
+    else:
+        try:
             # 使用有效点计算样条曲线
-            valid_x = [selected_x[i] for i in valid_indices]
-            valid_y = [selected_y[i] for i in valid_indices]
-            
-            # 计算样条曲线
             cx, cy, cyaw, ck, s = cs.calc_spline_course(
                 valid_x, valid_y, ds=P.d_dist)
             
             # 检查结果是否包含NaN值
             if np.isnan(np.sum(cx)) or np.isnan(np.sum(cy)) or np.isnan(np.sum(cyaw)) or np.isnan(np.sum(ck)):
                 rospy.logwarn("Spline calculation produced NaN values, using simple path")
-                cx = [0, 100, 200, 300]  # 沿车辆前方的直线
-                cy = [0, 0, 0, 0]        # 车辆中心线
-                cyaw = [0, 0, 0, 0]      # 与车辆方向一致
-                ck = [0, 0, 0, 0]        # 无曲率
-    
-    except Exception as e:
-        rospy.logerr(f"Error calculating spline course: {e}")
-        # 如果样条曲线计算失败，使用简单路径
-        cx = [0, 100, 200, 300]  # 沿车辆前方的直线
-        cy = [0, 0, 0, 0]        # 车辆中心线
-        cyaw = [0, 0, 0, 0]      # 与车辆方向一致
-        ck = [0, 0, 0, 0]        # 无曲率
+                cx = np.array([0, 50, 100, 150, 200, 250, 300])  # 沿车辆前方的直线
+                cy = np.array([0, 0, 0, 0, 0, 0, 0])             # 车辆中心线
+                cyaw = np.array([0, 0, 0, 0, 0, 0, 0])           # 与车辆方向一致
+                ck = np.array([0, 0, 0, 0, 0, 0, 0])             # 无曲率
+        except Exception as e:
+            rospy.logerr(f"Error calculating spline course: {e}")
+            # 如果样条曲线计算失败，使用简单路径
+            cx = np.array([0, 50, 100, 150, 200, 250, 300])  # 沿车辆前方的直线
+            cy = np.array([0, 0, 0, 0, 0, 0, 0])             # 车辆中心线
+            cyaw = np.array([0, 0, 0, 0, 0, 0, 0])           # 与车辆方向一致
+            ck = np.array([0, 0, 0, 0, 0, 0, 0])             # 无曲率
     
     # 创建参考路径对象
     local_ref_path = PATH(cx, cy, cyaw, ck)
-    
     return local_ref_path
 
 def generate_mpc_trajectory(ego_state, local_ref_path):
