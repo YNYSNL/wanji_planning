@@ -227,10 +227,16 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
     # 根据选择的方法生成局部坐标系下的轨迹
     if use_mpc and ref_lons and ref_lats and ref_s:
         # 将参考线转换为局部坐标系
+        start_time1 = time.time()
         local_ref_path = convert_reference_to_local(ego_state, ref_lons, ref_lats)
+        end_time1 = time.time()
+        rospy.loginfo(f"convert_reference_to_local time: {end_time1 - start_time1} seconds")
         
         # 使用MPC生成局部坐标系下的轨迹
+        start_time2 = time.time()
         x_local, y_local, yaw_local, v_local = generate_mpc_trajectory(ego_state, local_ref_path)
+        end_time2 = time.time()
+        rospy.loginfo(f"generate_mpc_trajectory time: {end_time2 - start_time2} seconds")
     else:
         # 使用简单的匀加速模型生成局部坐标系下的轨迹
         time_steps = 50
