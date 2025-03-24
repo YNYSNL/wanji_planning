@@ -133,9 +133,9 @@ class PATH:
 
         dx = [node.x - x for x in self.cx[self.ind_old:]]
         dy = [node.y - y for y in self.cy[self.ind_old:]]
-        dx_tensor = np.array(dx)
-        dy_tensor = np.array(dy)
-        dist = np.hypot(dx_tensor, dy_tensor)
+        dx_array = np.array(dx)
+        dy_array = np.array(dy)
+        dist = np.hypot(dx_array, dy_array)
 
         ind_in_N = int(np.argmin(dist))
         ind = self.ind_old + ind_in_N
@@ -144,8 +144,8 @@ class PATH:
         rear_axle_vec_rot_90 = np.array([[math.cos(node.yaw + math.pi / 2.0)],
                                          [math.sin(node.yaw + math.pi / 2.0)]])
 
-        vec_target_2_rear = np.array([[dx_tensor.cpu().numpy()[ind_in_N]],
-                                      [dy_tensor.cpu().numpy()[ind_in_N]]])
+        vec_target_2_rear = np.array([[dx_array[ind_in_N]],
+                                      [dy_array[ind_in_N]]])
 
         er = np.dot(vec_target_2_rear.T, rear_axle_vec_rot_90)
         er = er[0][0]
