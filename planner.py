@@ -371,8 +371,10 @@ def convert_reference_to_local(ego_state, ref_lons, ref_lats):
     
     # 将经纬度参考线转换为平面坐标系（与xy_to_latlon_batch的逆过程）
     x_global, y_global = transformer.transform(ref_lons_array, ref_lats_array)
-    x_global = np.array(x_global)-x0
-    y_global = np.array(y_global)-y0
+    
+    # 转换为numpy数组后再进行减法操作
+    x_global = np.array(x_global) - x0
+    y_global = np.array(y_global) - y0
     
     # 将平面坐标转换为车辆局部坐标系（与coordinate_transform的逆过程）
     theta = np.radians(ego_state.heading)
@@ -396,74 +398,80 @@ def convert_reference_to_local(ego_state, ref_lons, ref_lats):
         ref_x_local.append(rotated_point[0])
         ref_y_local.append(rotated_point[1])
     
+    # 选择参考线上的一段合适长度的路径（避免处理过长的参考线）
+    # 找到距离车辆最近的点
+    distances = [math.sqrt(x**2 + y**2) for x, y in zip(ref_x_local, ref_y_local)]
+    min_idx = distances.index(min(distances))
+    
+    # 选择前后各100个点，总共最多201个点
+    start_idx = max(0, min_idx - 100)
+    end_idx = min(len(ref_x_local), min_idx + 100)
+    
+    selected_x = ref_x_local[start_idx:end_idx]
+    selected_y = ref_y_local[start_idx:end_idx]
+    
+    # 确保有足够的点进行样条曲线拟合
+    if len(selected_x) < 4:
+        rospy.logerr("Not enough points for spline fitting")
+        # 创建一个简单的直线路径
+        cx = [0, 100, 200, 300]  # 沿车辆前方的直线
+        cy = [0, 0, 0, 0]        # 车辆中心线
+        cyaw = [0, 0, 0, 0]      # 与车辆方向一致
+        ck = [0, 0, 0, 0]        # 无曲率
+        local_ref_path = PATH(cx, cy, cyaw, ck)
+        return local_ref_path
+    
     # 使用样条曲线平滑参考线
     try:
-        cx, cy, cyaw, ck, s = cs.calc_spline_course(
-            ref_x_local, ref_y_local, ds=P.d_dist)
+        # 确保点的间距不为零
+        valid_indices = []
+        last_valid_x = selected_x[0]
+        last_valid_y = selected_y[0]
+        valid_indices.append(0)
+        
+        for i in range(1, len(selected_x)):
+            dist = math.sqrt((selected_x[i] - last_valid_x)**2 + (selected_y[i] - last_valid_y)**2)
+            if dist > 1.0:  # 最小间距为1厘米
+                valid_indices.append(i)
+                last_valid_x = selected_x[i]
+                last_valid_y = selected_y[i]
+        
+        # 如果有效点太少，添加一些人工点
+        if len(valid_indices) < 4:
+            rospy.logwarn(f"Too few valid points ({len(valid_indices)}), adding artificial points")
+            cx = [0, 100, 200, 300]  # 沿车辆前方的直线
+            cy = [0, 0, 0, 0]        # 车辆中心线
+            cyaw = [0, 0, 0, 0]      # 与车辆方向一致
+            ck = [0, 0, 0, 0]        # 无曲率
+        else:
+            # 使用有效点计算样条曲线
+            valid_x = [selected_x[i] for i in valid_indices]
+            valid_y = [selected_y[i] for i in valid_indices]
+            
+            # 计算样条曲线
+            cx, cy, cyaw, ck, s = cs.calc_spline_course(
+                valid_x, valid_y, ds=P.d_dist)
+            
+            # 检查结果是否包含NaN值
+            if np.isnan(np.sum(cx)) or np.isnan(np.sum(cy)) or np.isnan(np.sum(cyaw)) or np.isnan(np.sum(ck)):
+                rospy.logwarn("Spline calculation produced NaN values, using simple path")
+                cx = [0, 100, 200, 300]  # 沿车辆前方的直线
+                cy = [0, 0, 0, 0]        # 车辆中心线
+                cyaw = [0, 0, 0, 0]      # 与车辆方向一致
+                ck = [0, 0, 0, 0]        # 无曲率
+    
     except Exception as e:
         rospy.logerr(f"Error calculating spline course: {e}")
-        # 如果样条曲线计算失败，直接使用原始点
-        cx = ref_x_local
-        cy = ref_y_local
-        
-        # 计算航向角
-        cyaw = []
-        for i in range(len(cx)):
-            if i == 0:
-                yaw = math.atan2(cy[1] - cy[0], cx[1] - cx[0])
-            elif i == len(cx) - 1:
-                yaw = math.atan2(cy[i] - cy[i-1], cx[i] - cx[i-1])
-            else:
-                yaw = math.atan2(cy[i+1] - cy[i-1], cx[i+1] - cx[i-1]) / 2.0
-            cyaw.append(yaw)
-        
-        # 简单计算曲率
-        ck = [0.0] * len(cx)
-        s = np.zeros(len(cx))
-        for i in range(1, len(cx)):
-            s[i] = s[i-1] + math.sqrt((cx[i] - cx[i-1])**2 + (cy[i] - cy[i-1])**2)
+        # 如果样条曲线计算失败，使用简单路径
+        cx = [0, 100, 200, 300]  # 沿车辆前方的直线
+        cy = [0, 0, 0, 0]        # 车辆中心线
+        cyaw = [0, 0, 0, 0]      # 与车辆方向一致
+        ck = [0, 0, 0, 0]        # 无曲率
     
     # 创建参考路径对象
     local_ref_path = PATH(cx, cy, cyaw, ck)
     
     return local_ref_path
-
-# def convert_reference_to_local(ego_state, ref_lons, ref_lats):
-#     """
-#     将全局经纬度参考线转换为车辆局部坐标系下的参考线
-    
-#     参数:
-#         ego_state: 车辆当前状态
-#         ref_lons: 参考线经度列表
-#         ref_lats: 参考线纬度列表
-    
-#     返回:
-#         local_ref_path: 局部坐标系下的参考路径对象
-#     """
-#     from MotionPlanning.Control.MPC_XY_Frame import PATH
-    
-#     # 创建局部坐标系下的参考线
-#     cx = []
-#     cy = []
-#     cyaw = []
-#     ck = []
-    
-#     # 将经纬度参考线转换为局部坐标系
-#     for i in range(len(ref_lons)):
-#         # 计算相对于车辆当前位置的局部坐标（米）
-#         dx, dy = latlon_to_xy(ego_state.gx, ego_state.gy, ref_lons[i], ref_lats[i])
-#         dx *= 100  # 转换为厘米
-#         dy *= 100  # 转换为厘米
-        
-#         # 旋转到车辆坐标系
-#         ref_x_local, ref_y_local = rotate_point(dx, dy, -np.radians(ego_state.heading - 90))
-
-#         cx, cy, cyaw, ck, s = cs.calc_spline_course(ref_x_local, ref_y_local, P.dist)
-    
-#     # 创建参考路径对象
-#     local_ref_path = PATH(cx, cy, cyaw, ck)
-    
-#     return local_ref_path
 
 def generate_mpc_trajectory(ego_state, local_ref_path):
     """
