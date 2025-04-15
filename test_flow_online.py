@@ -122,6 +122,10 @@ def update_frame_data(topic, msg):
         frame_data["actuator"] = msg
         data_status["actuator"] = True
         rospy.loginfo("actuator received!")
+    elif topic == "/hdroutetoglobal":
+        frame_data["hdroutetoglobal"] = msg
+        data_status["hdroutetoglobal"] = True
+        rospy.loginfo("hdroutetoglobal received!")
         
 # 规划动作
 def cal_action(sensor_data, reference_data):
@@ -209,7 +213,7 @@ def offline_test():
     global bag_data, frame_data, data_status
     
     # 打开bag文件
-    file_path = '/media/wanji/ssd2T/20250211-bag/2025-02-11-15-31-30.bag'
+    file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
     bag = rosbag.Bag(file_path, 'r')
     
     # 按时间戳组织数据
@@ -270,12 +274,10 @@ def offline_test():
             # 进行规划
             ego_plan, ego_decision = cal_action(state_dict, ref_dict)
             # 打印规划结果
-            print(ego_plan)
-            print(ego_decision)
+            # print(ego_plan)
+            # print(ego_decision)
 
-            
-            # 保存或可视化结果
-            # save_frame_results(i, timestamp, ego_plan, ego_decision)
+
             print('---')
             
             # 重置数据状态标志
@@ -287,6 +289,7 @@ def main():
     # 选择运行模式
     if len(sys.argv) > 1 and sys.argv[1] == '--offline': # sys.argv[0] == filename.py sys.argv[1] == '--offline'
         print("Running in offline mode...")
+        rospy.init_node("ros_topic_processor_offline", anonymous=True)
         offline_test()
     else:
         print("Running in online mode...")

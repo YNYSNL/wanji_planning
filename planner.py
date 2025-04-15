@@ -208,16 +208,17 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
     
     # 创建车辆状态对象
     ego_state = Node(
-        x=DataFromEgo['0'].get("x", 0.0) * 100, 
-        y=DataFromEgo['0'].get("y", 0.0) * 100, 
+        x=DataFromEgo['0'].get("x", 0.0), 
+        y=DataFromEgo['0'].get("y", 0.0), 
         yaw=np.pi/2, 
-        v=DataFromEgo['0'].get("v", 0.0) * 100, 
+        v=DataFromEgo['0'].get("v", 0.0), 
         gx=DataFromEgo['0'].get("gx", 0.0), 
         gy=DataFromEgo['0'].get("gy", 0.0), 
         direct=1.0,
         heading=DataFromEgo['0'].get("heading", 0.0)
     )
     current_pos = (ego_state.gx, ego_state.gy)
+    print('current_heading',ego_state.heading)
     
     # 初始化车辆初始位置（仅在第一次规划时）
     if vehicle_init_pos is None:
@@ -229,12 +230,25 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         # 将参考线转换为局部坐标系
         start_time1 = time.time()
         local_ref_path = convert_reference_to_local(ego_state, ref_lons, ref_lats)
+        # plt.plot(local_ref_path.cx, local_ref_path.cy, marker='o', label='Trajectory Points')
+        
+        # plt.show()
         end_time1 = time.time()
         rospy.loginfo(f"convert_reference_to_local time: {end_time1 - start_time1} seconds")
         
         # 使用MPC生成局部坐标系下的轨迹
         start_time2 = time.time()
         x_local, y_local, yaw_local, v_local = generate_mpc_trajectory(ego_state, local_ref_path)
+        print(x_local[0],y_local[0])
+        # plt.plot(local_ref_path.cx, local_ref_path.cy, label='Trajectory Points',color='blue')
+        # plt.plot(x_local, y_local, label='Trajectory Points',color='red')
+
+        # plt.scatter(ego_state.x, ego_state.y, marker='x', label='Vehicle Position',s=80,color='red')
+
+        # plt.draw()
+        # plt.pause(1)
+        # plt.close()
+
         end_time2 = time.time()
         rospy.loginfo(f"generate_mpc_trajectory time: {end_time2 - start_time2} seconds")
     else:
@@ -243,9 +257,10 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         a = 2  # 加速度
         delta = 0  # 转向角
         x_local, y_local, yaw_local, v_local = generate_trajectory(ego_state, time_steps, a, delta)
+
     
     # 统一进行轨迹加密
-    x_local_dense, y_local_dense, yaw_local_dense = densify_trajectory(x_local, y_local, yaw_local, max_distance=20)
+    x_local_dense, y_local_dense, yaw_local_dense = densify_trajectory(x_local, y_local, yaw_local, max_distance=0.2)
     
     # 统一将加密后的轨迹从车辆坐标系旋转到全局坐标系
     x_global_dense, y_global_dense = coordinate_transform(x_local_dense, y_local_dense, target_heading=ego_state.heading)
@@ -258,7 +273,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
     # 4. 一次性将所有点转换为经纬度坐标
     gx_dense, gy_dense = xy_to_latlon_batch(
         ego_state.gx, ego_state.gy,
-        x_global_dense/100, y_global_dense/100)
+        x_global_dense, y_global_dense)
     
     # 5. 计算s值（相对于仿真初始位置的累计行驶距离）
     if ref_lons and ref_lats and ref_s:
@@ -322,8 +337,8 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
     trajectory_points = []
     for i in range(len(x_global_dense)):
         point = roadpoint()
-        point.x = x_local_dense[i]
-        point.y = y_local_dense[i]
+        point.x = x_local_dense[i] * 100
+        point.y = y_local_dense[i] * 100
         point.gx = gx_dense[i]
         point.gy = gy_dense[i]
         point.speed = base_point.speed
@@ -366,9 +381,9 @@ def convert_reference_to_local(ego_state, ref_lons, ref_lats):
     """
      
     # 确保有足够的参考点
-    if len(ref_lons) < 10 or len(ref_lats) < 10:
-        rospy.logwarn(f"Not enough reference points: {len(ref_lons)}")
-        return create_default_path()
+    # if len(ref_lons) < 10 or len(ref_lats) < 10:
+    #     rospy.logwarn(f"Not enough reference points: {len(ref_lons)}")
+    #     return create_default_path()
     
     # 1. 经纬度坐标系 -> 大地坐标系
     # 创建以车辆位置为中心的投影
@@ -389,15 +404,14 @@ def convert_reference_to_local(ego_state, ref_lons, ref_lats):
     # 注意：heading是车辆朝向与正北方向的夹角
     theta = np.radians(ego_state.heading)
     
-    # 创建旋转矩阵（与coordinate_transform中的矩阵互逆）
-    # 注意：这里不使用转置操作，直接定义逆旋转矩阵
+    # 创建旋转矩阵
     rotation_matrix_inv = np.array([
         [np.cos(theta), -np.sin(theta)], 
         [np.sin(theta), np.cos(theta)]
     ])
     
     # 批量进行坐标变换（转换为厘米）
-    points = np.column_stack((x_global * 100, y_global * 100))
+    points = np.column_stack((x_global, y_global))
     rotated_points = np.dot(points, rotation_matrix_inv)
     
     ref_x_local = rotated_points[:, 0]
@@ -437,21 +451,13 @@ def convert_reference_to_local(ego_state, ref_lons, ref_lats):
     valid_x, valid_y = filter_points(selected_x, selected_y)
     
     # 如果有效点太少，使用默认路径
-    if len(valid_x) < 4:
-        rospy.logwarn(f"Too few valid points ({len(valid_x)}), using default path")
-        return create_default_path()
+    # if len(valid_x) < 4:
+    #     rospy.logwarn(f"Too few valid points ({len(valid_x)}), using default path")
+    #     return create_default_path()
     
     # 计算样条曲线
-    try:
-        cx, cy, cyaw, ck, s = cs.calc_spline_course(valid_x, valid_y, ds=P.d_dist)
-        
-        # 检查结果是否包含NaN值
-        if np.isnan(np.sum(cx)) or np.isnan(np.sum(cy)) or np.isnan(np.sum(cyaw)) or np.isnan(np.sum(ck)):
-            rospy.logwarn("Spline calculation produced NaN values, using default path")
-            return create_default_path()
-    except Exception as e:
-        rospy.logerr(f"Error calculating spline course: {e}")
-        return create_default_path()
+    cx, cy, cyaw, ck, s = cs.calc_spline_course(valid_x, valid_y, ds=P.d_dist)
+
     
     # 创建参考路径对象
     local_ref_path = PATH(cx, cy, cyaw, ck)
@@ -509,29 +515,31 @@ def generate_mpc_trajectory(ego_state, local_ref_path):
     # 如果MPC控制器未初始化，则初始化
     if mpc_controller is None:    
         # 初始化MPC控制器
-        mpc_controller = MPCController(P.target_speed, initial_state)
+        mpc_controller = MPCController(P.target_speed, initial_state=initial_state)
         rospy.loginfo("MPC controller initialized")
     
+    print('initial_state',initial_state)
+    
     # 使用MPC控制器生成轨迹
-    try:
-        target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state)
+    # try:
+    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=False, acc_mode='accelerate')
+    
+    # if x_opt is None or y_opt is None or yaw_opt is None or v_opt is None:
+    #     rospy.logwarn("MPC optimization failed, falling back to simple trajectory")
+    #     # 如果MPC优化失败，使用简单轨迹
+    #     return fallback_trajectory(ego_state)
+    
+    # 将MPC预测轨迹转换为数组格式
+    x_local = np.array(x_opt)
+    y_local = np.array(y_opt)
+    yaw_local = np.array(yaw_opt)
+    v_local = np.array(v_opt)
+    
+    return x_local, y_local, yaw_local, v_local
         
-        if x_opt is None or y_opt is None or yaw_opt is None or v_opt is None:
-            rospy.logwarn("MPC optimization failed, falling back to simple trajectory")
-            # 如果MPC优化失败，使用简单轨迹
-            return fallback_trajectory(ego_state)
-        
-        # 将MPC预测轨迹转换为数组格式
-        x_local = np.array(x_opt)
-        y_local = np.array(y_opt)
-        yaw_local = np.array(yaw_opt)
-        v_local = np.array(v_opt)
-        
-        return x_local, y_local, yaw_local, v_local
-        
-    except Exception as e:
-        rospy.logerr(f"Error in MPC trajectory generation: {e}")
-        return fallback_trajectory(ego_state)
+    # except Exception as e:
+    #     rospy.logerr(f"Error in MPC trajectory generation: {e}")
+    #     return fallback_trajectory(ego_state)
 
 def fallback_trajectory(ego_state):
     """
@@ -574,7 +582,7 @@ def generate_trajectory(ego_state, time_steps=50, a=2, delta=0):
     
     return x, y, yaw, v
 
-def densify_trajectory(x, y, yaw, max_distance=20):
+def densify_trajectory(x, y, yaw, max_distance=0.2):
     """densify trajectory to ensure the distance between adjacent points does not exceed a specified value (vectorized implementation)"""
     # 计算所有相邻点之间的距离
     points = np.column_stack((x, y))
