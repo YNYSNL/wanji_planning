@@ -402,7 +402,8 @@ def convert_reference_to_local(ego_state, ref_lons, ref_lats):
     
     # 2. 大地坐标系 -> 车身局部坐标系
     # 注意：heading是车辆朝向与正北方向的夹角
-    theta = np.radians(ego_state.heading)
+    # theta = np.radians(90 - (360 - ego_state.heading) % 360)  # 或者更简单的方式
+    theta = np.radians((90 + ego_state.heading) % 360)
     
     # 创建旋转矩阵
     rotation_matrix_inv = np.array([
