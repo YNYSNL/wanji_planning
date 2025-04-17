@@ -704,6 +704,12 @@ class MPCController:
             'cost_values': [],
             'constraint_violations': []
         }
+        
+        # 多帧规划相关属性
+        self.frame_counter = 0            # 帧计数器
+        self.frame_update_rate = 0        # 每隔多少帧重新规划
+        self.control_index = 0            # 当前执行的控制量索引
+        self.stored_controls = None       # 存储规划得到的控制量序列 [a_opt, delta_opt]
 
     def update(self, ref_path, initial_state=None, consider_obstacles=True, acc_mode='accelerate', show_plot=False):
         """
@@ -720,55 +726,164 @@ class MPCController:
             self.node = Node(
                 x=initial_state[0], y=initial_state[1], yaw=initial_state[2], v=initial_state[3])
         
-        # Calculate reference trajectory
-        speed_profile = calc_speed_profile(self.ref_path.cx, self.ref_path.cy, 
-                                          self.ref_path.cyaw, self.target_speed)
-        z_ref, target_ind = calc_ref_trajectory_in_T_step(self.node, self.ref_path,
-                                                         speed_profile, acc_mode=acc_mode)
-        
-        # Current state
+        # 获取当前状态
         z0 = [self.node.x, self.node.y, self.node.v, self.node.yaw]
         
-        # Solve MPC problem
-        self.a_opt, self.delta_opt, x_opt, y_opt, yaw_opt, v_opt = linear_mpc_control(
-            z_ref, z0, self.a_opt, self.delta_opt, 
-            consider_obstacles=consider_obstacles
-        )
+        # 增加帧计数器
+        self.frame_counter += 1
         
-        # 绘图部分，根据show_plot参数决定是否显示
-        if show_plot and x_opt is not None and y_opt is not None:
-            # 使用连续刷新的绘图方式
-            plt.ion()  # 开启交互模式
-            plt.figure(1, figsize=(10, 8))
-            plt.clf()  # 清除当前图形
-            plt.plot(z_ref[0, :], z_ref[1, :], 'r-', linewidth=3, label='Reference Trajectory')
-            plt.plot(x_opt, y_opt, 'b-', linewidth=2, label='MPC Trajectory')
-            plt.plot(self.ref_path.cx, self.ref_path.cy, 'g-', linewidth=1, label='Reference Path')
-            plt.scatter(self.node.x, self.node.y, color='black', s=100, marker='*', label=f'Current Position (v={self.node.v:.2f} m/s)')
-            plt.legend()
-            plt.axis('equal')
-            plt.title("MPC Trajectory Planning")
-            plt.grid(True)
-            plt.savefig("mpc_trajectory.png")
-            plt.draw()  # 更新图形
-            plt.show(block=False)  # 非阻塞显示
+        # 是否需要重新规划
+        need_replan = (self.frame_counter >= self.frame_update_rate) or (self.stored_controls is None)
+        
+        if need_replan:
+            # 重置计数器和控制索引
+            self.frame_counter = 0
+            self.control_index = 0
             
-            # 强制处理图形事件
-            plt.pause(0.0001)  # 短暂暂停以使图形更新
-        
-        # Verify optimization results
-        if x_opt is not None and y_opt is not None:
-            logger.info(f"Optimization result initial point: ({x_opt[0]}, {y_opt[0]}), Current state: ({z0[0]}, {z0[1]})")
-            logger.info(f"Distance between optimization result and current state: {np.hypot(x_opt[0] - z0[0], y_opt[0] - z0[1])}")
-        
-        # Execute control
-        if self.delta_opt is not None:
-            self.delta_exc, self.a_exc = self.delta_opt[0], self.a_opt[0]
+            # 计算参考轨迹
+            speed_profile = calc_speed_profile(self.ref_path.cx, self.ref_path.cy, 
+                                             self.ref_path.cyaw, self.target_speed)
+            z_ref, target_ind = calc_ref_trajectory_in_T_step(self.node, self.ref_path,
+                                                            speed_profile, acc_mode=acc_mode)
+            
+            # 执行MPC优化，得到控制序列
+            self.a_opt, self.delta_opt, x_opt, y_opt, yaw_opt, v_opt = linear_mpc_control(
+                z_ref, z0, self.a_opt, self.delta_opt, 
+                consider_obstacles=consider_obstacles
+            )
+            
+            # 存储优化结果供后续帧使用
+            if self.a_opt is not None and self.delta_opt is not None:
+                self.stored_controls = {
+                    'a': self.a_opt,
+                    'delta': self.delta_opt,
+                    'z_ref': z_ref,
+                    'target_ind': target_ind,
+                    'x_init': x_opt[0] if x_opt is not None else self.node.x,
+                    'y_init': y_opt[0] if y_opt is not None else self.node.y,
+                    'yaw_init': yaw_opt[0] if yaw_opt is not None else self.node.yaw,
+                    'v_init': v_opt[0] if v_opt is not None else self.node.v,
+                    'full_states': {
+                        'x': x_opt,
+                        'y': y_opt,
+                        'yaw': yaw_opt,
+                        'v': v_opt
+                    }
+                }
+                
+                logger.info(f"MPC replanned, stored {len(self.a_opt)} control points")
+            else:
+                logger.warning("MPC optimization failed, no valid control sequence")
+                # 保持之前的控制量
+                self.a_exc = self.a_exc if hasattr(self, 'a_exc') else 0.0
+                self.delta_exc = self.delta_exc if hasattr(self, 'delta_exc') else 0.0
         else:
-            # If optimization fails, use previous control inputs or safe defaults
-            logger.warning("Using fallback control")
-            self.delta_exc = self.delta_exc if hasattr(self, 'delta_exc') else 0.0
-            self.a_exc = self.a_exc if hasattr(self, 'a_exc') else 0.0
+            # 不需要重新规划，使用上一次规划的控制序列
+            if self.stored_controls is not None and self.control_index < len(self.stored_controls['a']):
+                # 从存储的控制序列中获取当前应执行的控制量
+                self.a_exc = self.stored_controls['a'][self.control_index]
+                self.delta_exc = self.stored_controls['delta'][self.control_index]
+                
+                logger.info(f"Using stored control at index {self.control_index}, a={self.a_exc:.2f}, delta={self.delta_exc:.2f}")
+                
+                # 获取参考轨迹和目标索引
+                z_ref = self.stored_controls['z_ref']
+                target_ind = self.stored_controls['target_ind']
+                
+                # 计算剩余控制量序列
+                remaining_indices = list(range(self.control_index, len(self.stored_controls['a'])))
+                remaining_a = [self.stored_controls['a'][i] for i in remaining_indices]
+                remaining_delta = [self.stored_controls['delta'][i] for i in remaining_indices]
+                
+                # 使用当前状态和剩余控制量序列预测未来状态
+                # 创建模拟节点，从当前状态开始
+                sim_node = Node(
+                    x=self.node.x, y=self.node.y, 
+                    yaw=self.node.yaw, v=self.node.v
+                )
+                
+                # 初始化预测轨迹数组
+                x_pred = [sim_node.x]
+                y_pred = [sim_node.y]
+                yaw_pred = [sim_node.yaw]
+                v_pred = [sim_node.v]
+                
+                # 使用剩余的控制量序列向前模拟
+                for i in range(len(remaining_a)):
+                    # 使用剩余控制量更新模拟节点
+                    sim_node.update(remaining_a[i], remaining_delta[i], 1.0)
+                    
+                    # 记录状态
+                    x_pred.append(sim_node.x)
+                    y_pred.append(sim_node.y)
+                    yaw_pred.append(sim_node.yaw)
+                    v_pred.append(sim_node.v)
+                
+                # 如果预测的轨迹点太少，则向前多预测几步
+                last_a = remaining_a[-1] if remaining_a else 0.0
+                last_delta = remaining_delta[-1] if remaining_delta else 0.0
+                
+                # 确保至少有10个预测点
+                min_pred_points = 10
+                while len(x_pred) < min_pred_points:
+                    sim_node.update(last_a, last_delta, 1.0)
+                    x_pred.append(sim_node.x)
+                    y_pred.append(sim_node.y)
+                    yaw_pred.append(sim_node.yaw)
+                    v_pred.append(sim_node.v)
+                
+                # 使用预测的轨迹作为输出
+                x_opt = x_pred
+                y_opt = y_pred
+                yaw_opt = yaw_pred
+                v_opt = v_pred
+                
+                # 更新控制索引，为下一帧准备
+                self.control_index += 1
+            else:
+                # 如果控制序列已用完但还未到重规划时间，保持最后一个控制量
+                logger.warning("Control sequence exhausted before replan, using last control")
+                
+                # 获取最后一个控制量
+                if self.stored_controls is not None and len(self.stored_controls['a']) > 0:
+                    self.a_exc = self.stored_controls['a'][-1]
+                    self.delta_exc = self.stored_controls['delta'][-1]
+                # 否则保持不变
+                
+                # 虽然不重新规划，但仍需计算参考轨迹用于显示
+                speed_profile = calc_speed_profile(self.ref_path.cx, self.ref_path.cy, 
+                                                 self.ref_path.cyaw, self.target_speed)
+                z_ref, target_ind = calc_ref_trajectory_in_T_step(self.node, self.ref_path,
+                                                               speed_profile, acc_mode=acc_mode)
+                
+                # 使用当前状态和最后的控制量向前预测
+                sim_node = Node(
+                    x=self.node.x, y=self.node.y, 
+                    yaw=self.node.yaw, v=self.node.v
+                )
+                
+                # 预测时间步数
+                pred_steps = 10
+                
+                # 初始化预测轨迹数组
+                x_pred = [sim_node.x]
+                y_pred = [sim_node.y]
+                yaw_pred = [sim_node.yaw]
+                v_pred = [sim_node.v]
+                
+                # 使用最后的控制量向前预测
+                for i in range(1, pred_steps):
+                    sim_node.update(self.a_exc, self.delta_exc, 1.0)
+                    x_pred.append(sim_node.x)
+                    y_pred.append(sim_node.y)
+                    yaw_pred.append(sim_node.yaw)
+                    v_pred.append(sim_node.v)
+                
+                # 使用预测的轨迹作为输出
+                x_opt = x_pred
+                y_opt = y_pred
+                yaw_opt = yaw_pred
+                v_opt = v_pred
         
         # Update vehicle state
         self.node.update(self.a_exc, self.delta_exc, 1.0)
@@ -779,26 +894,48 @@ class MPCController:
         self.yaw.append(self.node.yaw)
         self.v.append(self.node.v)
         
+        # 绘图部分，根据show_plot参数决定是否显示
+        if show_plot:
+            self.plot_current_state(z_ref, x_opt, y_opt)
+        
+        # 确保返回的轨迹非空
+        if x_opt is None or y_opt is None or len(x_opt) == 0 or len(y_opt) == 0:
+            x_opt = [self.node.x]
+            y_opt = [self.node.y]
+            yaw_opt = [self.node.yaw]
+            v_opt = [self.node.v]
+        
         return target_ind, x_opt, y_opt, yaw_opt, v_opt
     
-    def plot_trajectories(self, z_ref, x_opt, y_opt):
-        """
-        Plot reference and optimized trajectories
-        :param z_ref: reference trajectory
-        :param x_opt: optimized x coordinates
-        :param y_opt: optimized y coordinates
-        """
-        plt.figure(figsize=(10, 8))
-        plt.plot(z_ref[0, :], z_ref[1, :], 'r-', linewidth=3, label='Reference Trajectory')
-        plt.plot(x_opt, y_opt, 'b-', linewidth=2, label='MPC Trajectory')
-        plt.plot(self.ref_path.cx, self.ref_path.cy, 'g-', linewidth=1, label='Reference Path')
-        plt.scatter(self.node.x, self.node.y, color='black', s=100, marker='*', label='Current Position')
-        plt.axis("equal")
-        plt.legend()
-        plt.title("MPC Trajectory Planning")
-        plt.grid(True)
+    def plot_current_state(self, z_ref, x_opt=None, y_opt=None):
+        """绘制当前状态和轨迹"""
+        plt.ion()  # 开启交互模式
+        plt.figure(1, figsize=(10, 8))
+        plt.clf()  # 清除当前图形
         
-        # Save image or display
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        plt.savefig(f"mpc_trajectory_{timestamp}.png")
-        plt.close()
+        # 绘制参考线
+        plt.plot(self.ref_path.cx, self.ref_path.cy, 'g-', linewidth=1, label='Reference Path')
+        
+        # 绘制参考轨迹
+        # if z_ref is not None:
+        #     plt.plot(z_ref[0, :], z_ref[1, :], 'r-', linewidth=2, label='Reference Trajectory')
+        
+        # 绘制优化轨迹（如果有）
+        if x_opt is not None and y_opt is not None:
+            plt.plot(x_opt, y_opt, 'b-', linewidth=2, label='MPC Trajectory')
+        
+        # 绘制当前位置
+        plt.scatter(self.node.x, self.node.y, color='black', s=100, marker='*', 
+                   label=f'Current Position (v={self.node.v:.2f} m/s)')
+        
+        # 绘制历史轨迹
+        # plt.plot(self.x, self.y, 'b--', linewidth=1, alpha=0.5, label='Actual Path')
+        
+        plt.legend()
+        plt.axis('equal')
+        plt.title(f"MPC Planning - Frame {self.frame_counter}/{self.frame_update_rate}")
+        plt.grid(True)
+        plt.savefig("mpc_trajectory.png")
+        plt.draw()
+        plt.show(block=False)
+        plt.pause(0.0001)
