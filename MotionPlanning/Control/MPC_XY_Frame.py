@@ -705,13 +705,14 @@ class MPCController:
             'constraint_violations': []
         }
 
-    def update(self, ref_path, initial_state=None, consider_obstacles=True, acc_mode='accelerate'):
+    def update(self, ref_path, initial_state=None, consider_obstacles=True, acc_mode='accelerate', show_plot=False):
         """
         Update MPC controller
         :param ref_path: reference path
         :param initial_state: initial state, if None use current state
         :param consider_obstacles: whether to consider obstacles
         :param acc_mode: acceleration mode ('accelerate', 'decelerate', 'maintain')
+        :param show_plot: whether to display plots
         :return: target index and optimized trajectory
         """
         self.ref_path = ref_path
@@ -728,50 +729,37 @@ class MPCController:
         # Current state
         z0 = [self.node.x, self.node.y, self.node.v, self.node.yaw]
         
-        # Log reference trajectory and current state difference
-        # logger.info(f"Reference trajectory initial point: ({z_ref[0,0]}, {z_ref[1,0]}), Current state: ({z0[0]}, {z0[1]})")
-        # logger.info(f"Distance between reference trajectory and current state: {np.hypot(z_ref[0,0] - z0[0], z_ref[1,0] - z0[1])}")
-        
         # Solve MPC problem
         self.a_opt, self.delta_opt, x_opt, y_opt, yaw_opt, v_opt = linear_mpc_control(
             z_ref, z0, self.a_opt, self.delta_opt, 
             consider_obstacles=consider_obstacles
         )
-        # plot z_ref, x_opt, y_opt, yaw_opt, v_opt
-        plt.figure(figsize=(10, 8))
-        plt.plot(z_ref[0, :], z_ref[1, :], 'r-', linewidth=3, label='Reference Trajectory')
-        plt.plot(x_opt, y_opt, 'b-', linewidth=2, label='MPC Trajectory')
-        plt.plot(self.ref_path.cx, self.ref_path.cy, 'g-', linewidth=1, label='Reference Path')
-        plt.scatter(self.node.x, self.node.y, color='black', s=100, marker='*', label='Current Position')
-        plt.savefig("mpc_trajectory.png")
-        plt.draw()
-        plt.pause(5)
-        plt.close()
         
-        # plot z_ref[3,:] and yaw_opt
-        plt.figure(figsize=(10, 8))
-        plt.plot(z_ref[3, :], 'r-', linewidth=3, label='Reference Trajectory')
-        plt.plot(yaw_opt, 'b-', linewidth=2, label='MPC Trajectory')
-        plt.savefig("mpc_yaw.png")
-        plt.draw()
-        plt.pause(5)
-        plt.close()
-
-        # plot self.a_opt and self.delta_opt
-        plt.figure(figsize=(10, 8))
-        plt.plot(self.a_opt, 'r-', linewidth=3, label='Acceleration')
-        plt.plot(self.delta_opt, 'b-', linewidth=2, label='Steering')
-        plt.savefig("mpc_control.png")
-        plt.draw()
-        plt.pause(5)
-        plt.close()
+        # 绘图部分，根据show_plot参数决定是否显示
+        if show_plot and x_opt is not None and y_opt is not None:
+            # 使用连续刷新的绘图方式
+            plt.ion()  # 开启交互模式
+            plt.figure(1, figsize=(10, 8))
+            plt.clf()  # 清除当前图形
+            plt.plot(z_ref[0, :], z_ref[1, :], 'r-', linewidth=3, label='Reference Trajectory')
+            plt.plot(x_opt, y_opt, 'b-', linewidth=2, label='MPC Trajectory')
+            plt.plot(self.ref_path.cx, self.ref_path.cy, 'g-', linewidth=1, label='Reference Path')
+            plt.scatter(self.node.x, self.node.y, color='black', s=100, marker='*', label=f'Current Position (v={self.node.v:.2f} m/s)')
+            plt.legend()
+            plt.axis('equal')
+            plt.title("MPC Trajectory Planning")
+            plt.grid(True)
+            plt.savefig("mpc_trajectory.png")
+            plt.draw()  # 更新图形
+            plt.show(block=False)  # 非阻塞显示
+            
+            # 强制处理图形事件
+            plt.pause(0.0001)  # 短暂暂停以使图形更新
+        
         # Verify optimization results
         if x_opt is not None and y_opt is not None:
             logger.info(f"Optimization result initial point: ({x_opt[0]}, {y_opt[0]}), Current state: ({z0[0]}, {z0[1]})")
             logger.info(f"Distance between optimization result and current state: {np.hypot(x_opt[0] - z0[0], y_opt[0] - z0[1])}")
-            
-            # Optional: Plot reference and optimized trajectories
-            # self.plot_trajectories(z_ref, x_opt, y_opt)
         
         # Execute control
         if self.delta_opt is not None:
@@ -814,70 +802,3 @@ class MPCController:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         plt.savefig(f"mpc_trajectory_{timestamp}.png")
         plt.close()
-
-def main():
-    # ax = [0.0, 15.0, 30.0, 50.0, 60.0]
-    # ay = [0.0, 40.0, 15.0, 30.0, 0.0]
-    df = pd.read_csv(
-        '/home/liuyiru/git_code/emergency_driving/reference_line.csv')
-
-    # 将x、y坐标赋值给ax、ay
-    ax = df['x'].values.tolist()
-    ay = df['y'].values.tolist()
-    cx, cy, cyaw, ck, s = cs.calc_spline_course(ax, ay, ds=P.d_dist)
-
-    ref_path = PATH(cx, cy, cyaw, ck)
-    # 在参考线附近设置一个障碍物位置
-    # obstacle_x = cx[10] + 2.0  # 假设障碍物在参考线的第11个点右侧2个单位
-    # obstacle_y = cy[10] + 2.0  # 把障碍物设定在参考线的第11个点上方2个单位
-    # obstacles = [(obstacle_x, obstacle_y)]
-
-    mpc_controller = MPCController(P.target_speed, initial_state=[-9395.3315562016, 10586.9760156328, -3.082942009, 6.2112471446])
-
-    time = 0.0  # 在 main 函数中控制时间
-    while time < P.time_max:
-        print("Time: ", time)
-        target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(ref_path=ref_path)
-        new_state = [mpc_controller.node.x, mpc_controller.node.y, mpc_controller.node.yaw]
-        print("Current yaw: ", mpc_controller.node.yaw)
-        # ref_path = np.vstack((cx, cy)).T
-        # trans_ref = transform(ref_path, new_state)
-
-        dist = math.hypot(mpc_controller.node.x - cx[-1], 
-                          mpc_controller.node.y - cy[-1])
-
-        if dist < P.dist_stop and abs(mpc_controller.node.v) < P.speed_stop:
-            break
-
-        # 绘图代码
-        plt.cla()
-        if len(mpc_controller.yaw) > 1:  # 确保有足够的数据
-            steer = rs.pi_2_pi(-math.atan(P.WB * ((mpc_controller.node.yaw - mpc_controller.yaw[-2]) /
-                                                  (mpc_controller.node.v * P.dt))))
-        else:
-            steer = 0.0  # 如果没有足够的数据，则设定为0
-
-        draw.draw_car(mpc_controller.node.x, mpc_controller.node.y,
-                      mpc_controller.node.yaw, steer, P)
-        plt.plot(cx, cy, color='gray')
-        plt.plot(mpc_controller.x, mpc_controller.y, '-b')
-        if x_opt is not None:
-            plt.plot(x_opt, y_opt, color='darkviolet', marker='*')
-        plt.plot(cx[target_ind], cy[target_ind])
-        plt.axis("equal")
-        plt.title("Linear MPC, " + "v = " +
-                  str(round(mpc_controller.node.v * 3.6, 2)))
-        if time < 0.1:
-            plt.savefig("mpc_xy_frame_update.png")
-        plt.pause(1)
-
-        time += P.dt  # 在 main 函数中增量时间
-
-    plt.show()
-
-
-if __name__ == '__main__':
-    import draw as draw
-    import reeds_shepp as rs
-    import cubic_spline as cs
-    main()

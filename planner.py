@@ -525,7 +525,7 @@ def generate_mpc_trajectory(ego_state, local_ref_path):
     
     # 使用MPC控制器生成轨迹
     # try:
-    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=False, acc_mode='accelerate')
+    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=False, acc_mode='accelerate',show_plot=True)
     
     # if x_opt is None or y_opt is None or yaw_opt is None or v_opt is None:
     #     rospy.logwarn("MPC optimization failed, falling back to simple trajectory")

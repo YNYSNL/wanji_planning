@@ -213,7 +213,8 @@ def offline_test():
     global bag_data, frame_data, data_status
     
     # 打开bag文件
-    file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
+    # file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
+    file_path = '/home/admin/Downloads/2025-04-17-13-05-25.bag' 
     bag = rosbag.Bag(file_path, 'r')
     
     # 按时间戳组织数据
@@ -245,6 +246,7 @@ def offline_test():
     
     # 处理每一帧数据
     for i, timestamp in enumerate(sorted_timestamps):
+
         frame = frame_timestamps[timestamp]
         print(f"\nProcessing frame {i+1}/{len(sorted_timestamps)}")
         
@@ -260,6 +262,9 @@ def offline_test():
 
         print(data_status.values())       
         # 检查数据是否完整并进行规划
+        if i < 400:
+            continue
+        
         if all(data_status.values()):
             print("Processing planning for frame...")
             
