@@ -107,6 +107,68 @@ data_status = {
     "hdroutetoglobal": False
 }
 
+# 障碍物处理类
+class ObstacleInfo:
+    def __init__(self, obs_id, x, y, width=2.0, length=5.0):
+        self.obs_id = obs_id
+        self.x = x
+        self.y = y
+        self.width = width
+        self.length = length
+        self.positions = [[np.array([x, y])]]  # 静态障碍物的位置 [t][v_id]
+
+# 处理障碍物信息
+def process_obstacles(sensorobjects_msg):
+    """
+    处理障碍物信息并更新MPC控制器中的障碍物
+    注意：此函数不再直接使用，而是被cal_action中的代码取代，
+    保留此函数仅作为参考。cal_action中的代码对坐标变换进行了更详细的处理。
+    
+    参数:
+        sensorobjects_msg: 传感器检测到的障碍物消息
+    """
+    obstacles = {}
+    
+    if sensorobjects_msg and hasattr(sensorobjects_msg, 'obs') and len(sensorobjects_msg.obs) > 0:
+        # 清空之前的障碍物
+        P.obstacles.clear()
+        
+        # 更新障碍物数量
+        P.num_obstacles = len(sensorobjects_msg.obs)
+        
+        # 处理每个障碍物
+        for i, obj in enumerate(sensorobjects_msg.obs):
+            # 提取障碍物ID和位置
+            obs_id = obj.id
+            
+            # 获取障碍物的全局位置（米为单位）
+            # 注意：需要将传感器数据中的厘米转换为米
+            x_global = obj.x / 100.0  # 厘米转米
+            y_global = obj.y / 100.0  # 厘米转米
+            
+            # 使用检测到的宽度和长度，或者使用默认值（单位转换为米）
+            width = obj.width / 100.0 if obj.width > 0.1 else 2.0  # 默认宽度2.0m
+            length = obj.length / 100.0 if obj.length > 0.1 else 5.0  # 默认长度5.0m
+            
+            # 将障碍物位置转换到车辆坐标系
+            # 此处假设车辆位于原点(0,0)，并且朝向是车辆坐标系的正前方
+            # 实际应用中需要根据车辆当前位置和朝向进行坐标变换
+            
+            # 创建障碍物信息对象，使用局部坐标
+            obstacle = ObstacleInfo(obs_id, x_global, y_global, width, length)
+            
+            # 将障碍物添加到P.obstacles中
+            P.obstacles[obs_id] = obstacle
+            
+        rospy.loginfo(f"更新了 {P.num_obstacles} 个障碍物")
+    else:
+        # 清空障碍物
+        P.obstacles.clear()
+        P.num_obstacles = 0
+        rospy.loginfo("没有检测到障碍物或障碍物消息为空")
+    
+    return obstacles
+
 def update_frame_data(topic, msg):
     if topic == "/sensorgps":
         frame_data["sensorgps"] = msg
@@ -133,6 +195,61 @@ def cal_action(sensor_data, reference_data):
     ego_decision = decisionbehavior()
     ego_plan.points = roadpoint()
     use_mpc = True
+    
+    # 处理障碍物信息
+    if "objectTrack" in frame_data and frame_data["objectTrack"] is not None:
+        sensorobjects_msg = frame_data["objectTrack"]
+        
+        # 初始化障碍物参数
+        if hasattr(sensorobjects_msg, 'obs'):
+            P.init(num_obstacles=len(sensorobjects_msg.obs),
+                  obstacle_horizon=20,
+                  num_modes=1,
+                  treat_obstacles_as_static=True)
+            
+            # 清空之前的障碍物
+            P.obstacles.clear()
+            
+            # 如果有障碍物，处理它们
+            if len(sensorobjects_msg.obs) > 0:
+                rospy.loginfo(f"检测到 {len(sensorobjects_msg.obs)} 个障碍物")
+                
+                # 处理每个障碍物
+                for i, obj in enumerate(sensorobjects_msg.obs):
+                    # 提取障碍物ID
+                    obs_id = i
+                    
+                    # 获取障碍物的全局位置（米为单位）
+                    obs_x_global = obj.x 
+                    obs_y_global = obj.y 
+                    
+                    # # 障碍物相对于车辆的位置（全局坐标系）
+                    # dx = obs_x_global - ego_x
+                    # dy = obs_y_global - ego_y
+                    
+                    # # 将障碍物位置从全局坐标系转换到车辆局部坐标系
+                    # # 1. 平移（使车辆位置为原点）
+                    # # 2. 旋转（使车辆朝向为x轴正方向）
+                    # obs_x_local = dx * np.cos(-ego_heading) - dy * np.sin(-ego_heading)
+                    # obs_y_local = dx * np.sin(-ego_heading) + dy * np.cos(-ego_heading)
+                    
+                    # 使用检测到的宽度和长度，或者使用默认值（单位转换为米）
+                    width = obj.width 
+                    length = obj.length
+                    # rospy.loginfo(f"障碍物 {obs_id} 局部坐标: x={obs_x_local:.2f}, y={obs_y_local:.2f}, w={width:.2f}, l={length:.2f}")
+                    
+                    # 创建障碍物信息对象，使用局部坐标
+                    obstacle = ObstacleInfo(obs_id, obs_x_global, obs_y_global, width, length)
+                    
+                    # 将障碍物添加到P.obstacles中
+                    P.obstacles[obs_id] = obstacle
+
+        else:
+            # 如果没有障碍物信息，则清空障碍物
+            P.init(num_obstacles=0)
+            rospy.loginfo("没有检测到障碍物，清空障碍物列表")
+    
+    # 调用规划算法
     ego_plan, ego_decision = CACS_plan(sensor_data, reference_data, ego_plan, ego_decision, use_mpc)
 # 
     # global bag_data
@@ -182,6 +299,7 @@ def check_and_process_data():
 
         # 重置数据状态标志
         reset_data_status()
+
 # 回调函数
 def callback_sensorgps(data):
     update_frame_data("/sensorgps", data)
@@ -262,7 +380,7 @@ def offline_test():
 
         print(data_status.values())       
         # 检查数据是否完整并进行规划
-        if i < 400:
+        if i < 350:
             continue
         
         if all(data_status.values()):
@@ -278,10 +396,6 @@ def offline_test():
             
             # 进行规划
             ego_plan, ego_decision = cal_action(state_dict, ref_dict)
-            # 打印规划结果
-            # print(ego_plan)
-            # print(ego_decision)
-
 
             print('---')
             

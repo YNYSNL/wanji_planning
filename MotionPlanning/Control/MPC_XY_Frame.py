@@ -61,17 +61,18 @@ class P:
     acceleration_max = 2.0  # maximum acceleration [m/s2]
 
     num_obstacles = 1  # number of obstacles
-    obstacles = dict()  # obstacles: {id: [x, y, w, h]}
+    obstacles = dict()  # obstacles: {id: [x, y, w, l]}
     obstacle_horizon = 20  # horizon length for obstacle avoidance
     num_modes = 1  # number of modes for Reeds-Shepp path
+    treat_obstacles_as_static = True  # treat obstacles as static
 
     @classmethod
-    def init(cls, num_obstacles=1, obstacle_horizon=20, num_modes=1):
+    def init(cls, num_obstacles=1, obstacle_horizon=20, num_modes=1, treat_obstacles_as_static=True):
         cls.num_obstacles = num_obstacles
         cls.obstacles = dict()
         cls.obstacle_horizon = obstacle_horizon
         cls.num_modes = num_modes
-
+        cls.treat_obstacles_as_static = treat_obstacles_as_static
 class Node:
     def __init__(self, x=0.0, y=0.0, yaw=0.0, v=0.0, direct=1.0, gx=0, gy=0, heading=0.0):
         self.x = x
@@ -287,7 +288,7 @@ def linear_mpc_control(z_ref, z0, a_old, delta_old, consider_obstacles=True):
         if a_old is None:
             # If optimization fails, use previous control inputs
             logger.warning("Optimization failed, using previous control inputs")
-            return a_rec, delta_rec, None, None, None, None
+            return None, None, None, None, None, None
         
         # Calculate maximum control change
         du_a_max = max([abs(ia - iao) for ia, iao in zip(a_old, a_rec)])
@@ -506,28 +507,36 @@ class MPCProblem:
     
     def add_obstacle_constraints(self):
         """Add obstacle constraints"""
+        treat_as_static = P.treat_obstacles_as_static
         for t in range(min(P.T, P.obstacle_horizon)):
             # Calculate distances to all obstacles
             distances = []
             for obs_id, obstacle in P.obstacles.items():
-                obs_pos = obstacle.positions[0][t]
+                if treat_as_static:
+                    obs_pos = obstacle.positions[0][0]
+                else:
+                    obs_pos = obstacle.positions[0][t]
                 robot_current_pos = self.z_bar[:2, t]  # Use current position for distance calculation
                 dist = np.linalg.norm(robot_current_pos - obs_pos)
                 distances.append((dist, obs_id, obs_pos))
             
             # Sort by distance and get closest obstacle
             distances.sort(key=lambda x: x[0])
-            closest_obstacles = distances[:1]
+            # 考虑最近的几个障碍物，可以调整数量
+            closest_obstacles = distances[:3]  # 考虑最近的3个障碍物
             
-            # Add constraints for closest obstacle
+            # Add constraints for closest obstacles
             for dist, obs_id, obs_pos in closest_obstacles:
                 # Calculate unit vector from obstacle to robot
                 diff = self.z_bar[:2, t] - obs_pos
+
+                if dist > 20:
+                    continue
                 
                 # Avoid numerical issues
                 if dist >= 0.001:
                     a = diff / dist  # unit vector
-                    safe_distance = 3
+                    safe_distance = 5
                     
                     # Convert to CasADi DM
                     a_ca = ca.DM(a)
@@ -536,7 +545,8 @@ class MPCProblem:
                     # Add obstacle avoidance constraint
                     constraint_expr = a_ca[0] * (self.z[0, t] - obs_pos_ca[0]) + a_ca[1] * (self.z[1, t] - obs_pos_ca[1])
                     self.opti.subject_to(constraint_expr >= safe_distance)
-                break
+                    
+                    # logger.info(f"添加避障约束 t={t}, obs_id={obs_id}, dist={dist:.2f}m")
     
     def setup_solver(self):
         """Setup solver options"""
@@ -581,7 +591,30 @@ class MPCProblem:
             return a, delta, x, y, yaw, v
             
         except Exception as e:
-            logger.error(f"Optimization error: {str(e)}")
+            # 详细记录优化失败的原因
+            err_msg = str(e)
+            if "infeasible" in err_msg.lower():
+                logger.error(f"MPC无解：约束不可满足 - {err_msg}")
+                logger.error("可能存在避障约束无法满足，建议使用紧急制动")
+            elif "convergence" in err_msg.lower():
+                logger.error(f"MPC未收敛：优化求解器未收敛 - {err_msg}")
+                logger.error("优化器在最大迭代次数内未收敛，建议使用紧急制动")
+            elif "timeout" in err_msg.lower():
+                logger.error(f"MPC超时：计算时间过长 - {err_msg}")
+            else:
+                logger.error(f"MPC优化错误：{err_msg}")
+            
+            # 记录当前车辆状态和障碍物信息
+            if P.obstacles:
+                logger.error(f"当前有 {len(P.obstacles)} 个障碍物")
+                for obs_id, obstacle in P.obstacles.items():
+                    if hasattr(obstacle, 'positions') and len(obstacle.positions) > 0 and len(obstacle.positions[0]) > 0:
+                        obs_pos = obstacle.positions[0][0]
+                        robot_pos = self.z0[:2]
+                        dist = np.linalg.norm(robot_pos - obs_pos)
+                        logger.error(f"障碍物 {obs_id}: 位置=({obs_pos[0]:.2f}, {obs_pos[1]:.2f}), 距离={dist:.2f}m")
+            
+            # 记录详细的调试信息
             self.log_debug_info()
             return None, None, None, None, None, None
     
@@ -677,7 +710,7 @@ def pi_2_pi(angle):
 
 
 class MPCController:
-    def __init__(self, target_speed, initial_state):
+    def __init__(self, target_speed, initial_state, treat_obstacles_as_static=True):
         """
         Initialize MPC controller
         :param target_speed: target speed
@@ -697,6 +730,8 @@ class MPCController:
                                                                     [0.0])
         self.delta_opt, self.a_opt = None, None
         self.a_exc, self.delta_exc = 0.0, 0.0
+
+        P.treat_obstacles_as_static = treat_obstacles_as_static
         
         # Debug information
         self.debug_info = {
@@ -707,7 +742,7 @@ class MPCController:
         
         # 多帧规划相关属性
         self.frame_counter = 0            # 帧计数器
-        self.frame_update_rate = 0        # 每隔多少帧重新规划
+        self.frame_update_rate = 3        # 每隔多少帧重新规划
         self.control_index = 0            # 当前执行的控制量索引
         self.stored_controls = None       # 存储规划得到的控制量序列 [a_opt, delta_opt]
 
@@ -773,10 +808,54 @@ class MPCController:
                 
                 logger.info(f"MPC replanned, stored {len(self.a_opt)} control points")
             else:
-                logger.warning("MPC optimization failed, no valid control sequence")
-                # 保持之前的控制量
-                self.a_exc = self.a_exc if hasattr(self, 'a_exc') else 0.0
-                self.delta_exc = self.delta_exc if hasattr(self, 'delta_exc') else 0.0
+                logger.warning("MPC optimization failed, using emergency deceleration (-2.0 m/s²)")
+                # 设置减速度为-2.0，方向盘保持不变
+                self.a_exc = -2.0  # 紧急减速度
+                self.delta_exc = 0.0  # 保持方向盘不变
+                
+                # 计算紧急减速轨迹，用于显示
+                emergency_node = Node(
+                    x=self.node.x, y=self.node.y, 
+                    yaw=self.node.yaw, v=self.node.v
+                )
+                
+                # 预测时间步数
+                pred_steps = 10
+                
+                # 初始化预测轨迹数组
+                x_pred = [emergency_node.x]
+                y_pred = [emergency_node.y]
+                yaw_pred = [emergency_node.yaw]
+                v_pred = [emergency_node.v]
+                
+                # 使用紧急减速进行预测
+                for i in range(1, pred_steps):
+                    # 更新车辆状态，使用紧急减速度
+                    emergency_node.update(self.a_exc, self.delta_exc, 1.0)
+                    
+                    # 记录状态
+                    x_pred.append(emergency_node.x)
+                    y_pred.append(emergency_node.y)
+                    yaw_pred.append(emergency_node.yaw)
+                    v_pred.append(emergency_node.v)
+                    
+                    # 如果速度接近零，则停止预测
+                    if emergency_node.v <= 0.1:
+                        break
+                
+                # 使用预测的轨迹作为输出
+                x_opt = x_pred
+                y_opt = y_pred
+                yaw_opt = yaw_pred
+                v_opt = v_pred
+                
+                # 设置参考轨迹和目标索引，用于显示
+                speed_profile = calc_speed_profile(self.ref_path.cx, self.ref_path.cy, 
+                                                 self.ref_path.cyaw, self.target_speed)
+                z_ref, target_ind = calc_ref_trajectory_in_T_step(self.node, self.ref_path,
+                                                               speed_profile, acc_mode='decelerate')
+                
+                logger.warning(f"Emergency brake trajectory generated with {len(x_opt)} points, starting speed: {v_opt[0]:.2f} m/s")
         else:
             # 不需要重新规划，使用上一次规划的控制序列
             if self.stored_controls is not None and self.control_index < len(self.stored_controls['a']):
@@ -927,6 +1006,26 @@ class MPCController:
         # 绘制当前位置
         plt.scatter(self.node.x, self.node.y, color='black', s=100, marker='*', 
                    label=f'Current Position (v={self.node.v:.2f} m/s)')
+        
+        # 绘制障碍物
+        if P.obstacles:
+            for obs_id, obstacle in P.obstacles.items():
+                # 获取障碍物位置
+                if hasattr(obstacle, 'positions') and len(obstacle.positions) > 0 and len(obstacle.positions[0]) > 0:
+                    obs_pos = obstacle.positions[0][0]
+                    plt.scatter(obs_pos[0], obs_pos[1], color='red', s=100, marker='x', 
+                               label=f'Obstacle {obs_id}' if obs_id == list(P.obstacles.keys())[0] else "")
+                    
+                    # 绘制障碍物范围（可选）
+                    if hasattr(obstacle, 'width') and hasattr(obstacle, 'length'):
+                        length = obstacle.width if obstacle.width > 0 else 2.0
+                        width = obstacle.length if obstacle.length > 0 else 5.0
+                        # 创建矩形表示障碍物
+                        rect = plt.Rectangle(
+                            (obs_pos[0] - length/2, obs_pos[1] - width/2),
+                            length, width, fill=False, color='red', linestyle='--'
+                        )
+                        plt.gca().add_patch(rect)
         
         # 绘制历史轨迹
         # plt.plot(self.x, self.y, 'b--', linewidth=1, alpha=0.5, label='Actual Path')
