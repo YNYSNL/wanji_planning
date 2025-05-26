@@ -434,7 +434,7 @@ def convert_reference_to_local(ego_state, ref_lons, ref_lats):
     
     # 选择前后各250个点
     start_idx = max(0, front_indices[min_front_idx] - 100)
-    end_idx = min(len(ref_x_local), front_indices[min_front_idx] + 400)
+    end_idx = min(len(ref_x_local), front_indices[min_front_idx] + 1000)
     
     # 确保有足够的点
     if end_idx - start_idx < 10:
@@ -525,7 +525,7 @@ def generate_mpc_trajectory(ego_state, local_ref_path):
     
     # 使用MPC控制器生成轨迹
     # try:
-    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=True, acc_mode='accelerate',show_plot=True)
+    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=False, acc_mode='accelerate',show_plot=True)
     
     # if x_opt is None or y_opt is None or yaw_opt is None or v_opt is None:
     #     rospy.logwarn("MPC optimization failed, falling back to simple trajectory")
