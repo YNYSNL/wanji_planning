@@ -27,7 +27,7 @@ class P:
     # System config
     NX = 4  # state vector: z = [x, y, v, phi]
     NU = 2  # input vector: u = [acceleration, steer]
-    T = 20  # finite time horizon length that is the same as PLAN_HORIZON
+    T = 15  # finite time horizon length that is the same as PLAN_HORIZON
 
     # MPC config
     Q = np.diag([1.0, 1.0, 1.0, 1.0])  # penalty for states
@@ -41,7 +41,7 @@ class P:
     iter_max = 5  # max iteration
     target_speed = 40.0 / 3.6  # target speed
     N_IND = 50  # search index number
-    dt = 0.1  # time step
+    dt = 0.3  # time step
     d_dist = 1.0  # dist step
     du_res = 0.1  # threshold for stopping iteration
 
@@ -65,14 +65,17 @@ class P:
     obstacle_horizon = 20  # horizon length for obstacle avoidance
     num_modes = 1  # number of modes for Reeds-Shepp path
     treat_obstacles_as_static = True  # treat obstacles as static
+    use_linear_obstacle_constraints = True  # use linear constraints for obstacles (faster computation)
 
     @classmethod
-    def init(cls, num_obstacles=1, obstacle_horizon=20, num_modes=1, treat_obstacles_as_static=True):
+    def init(cls, num_obstacles=1, obstacle_horizon=20, num_modes=1, treat_obstacles_as_static=True, use_linear_obstacle_constraints=False):
         cls.num_obstacles = num_obstacles
         cls.obstacles = dict()
         cls.obstacle_horizon = obstacle_horizon
         cls.num_modes = num_modes
         cls.treat_obstacles_as_static = treat_obstacles_as_static
+        cls.use_linear_obstacle_constraints = use_linear_obstacle_constraints
+
 class Node:
     def __init__(self, x=0.0, y=0.0, yaw=0.0, v=0.0, direct=1.0, gx=0, gy=0, heading=0.0):
         self.x = x
@@ -260,7 +263,7 @@ def calc_ref_trajectory_in_T_step(node, ref_path, sp, acc_mode='accelerate'):
     return z_ref, ind
 
 
-def linear_mpc_control(z_ref, z0, a_old, delta_old, consider_obstacles=True):
+def linear_mpc_control(z_ref, z0, a_old, delta_old, consider_obstacles=True, use_linear_constraints=None):
     """
     linear mpc controller
     :param z_ref: reference trajectory in T steps
@@ -268,11 +271,20 @@ def linear_mpc_control(z_ref, z0, a_old, delta_old, consider_obstacles=True):
     :param a_old: acceleration of T steps from last time
     :param delta_old: delta of T steps from last time
     :param consider_obstacles: whether to consider obstacles
+    :param use_linear_constraints: whether to use linear obstacle constraints (None=use P.use_linear_obstacle_constraints)
     :return: acceleration and delta strategy based on current information
     """
     if a_old is None or delta_old is None:
         a_old = [0.0] * P.T
         delta_old = [0.0] * P.T
+
+    # 如果没有指定约束类型，使用全局配置
+    if use_linear_constraints is None:
+        use_linear_constraints = P.use_linear_obstacle_constraints
+    
+    # 临时保存全局配置并设置新值
+    original_setting = P.use_linear_obstacle_constraints
+    P.use_linear_obstacle_constraints = use_linear_constraints
 
     x, y, yaw, v = None, None, None, None
 
@@ -299,6 +311,9 @@ def linear_mpc_control(z_ref, z0, a_old, delta_old, consider_obstacles=True):
             logger.info(f"MPC iteration converged, iterations: {k+1}")
             break
 
+    # 恢复全局配置
+    P.use_linear_obstacle_constraints = original_setting
+    
     return a_old, delta_old, x, y, yaw, v
 
 
@@ -439,7 +454,12 @@ class MPCProblem:
         self.add_control_constraints()
         
         if self.consider_obstacles and P.obstacles is not None:
-            self.add_obstacle_constraints()
+            if P.use_linear_obstacle_constraints:
+                self.add_linear_obstacle_constraints()
+                logger.info("使用线性化障碍物约束")
+            else:
+                self.add_obstacle_constraints()
+                logger.info("使用非线性障碍物约束")
     
     def define_objective(self):
         """Define objective function"""
@@ -523,7 +543,7 @@ class MPCProblem:
             # Sort by distance and get closest obstacle
             distances.sort(key=lambda x: x[0])
             # 考虑最近的几个障碍物，可以调整数量
-            closest_obstacles = distances[:3]  # 考虑最近的3个障碍物
+            closest_obstacles = distances[:1]  # 考虑最近的3个障碍物
             
             # Add constraints for closest obstacles
             for dist, obs_id, obs_pos in closest_obstacles:
@@ -536,7 +556,7 @@ class MPCProblem:
                 # Avoid numerical issues
                 if dist >= 0.001:
                     a = diff / dist  # unit vector
-                    safe_distance = 5
+                    safe_distance = 3.5
                     
                     # Convert to CasADi DM
                     a_ca = ca.DM(a)
@@ -547,6 +567,56 @@ class MPCProblem:
                     self.opti.subject_to(constraint_expr >= safe_distance)
                     
                     # logger.info(f"添加避障约束 t={t}, obs_id={obs_id}, dist={dist:.2f}m")
+    
+    def add_linear_obstacle_constraints(self):
+        """Add linearized obstacle constraints for faster computation using previous trajectory"""
+        treat_as_static = P.treat_obstacles_as_static
+        
+        # 使用上一次规划结果的预测轨迹来计算线性化避障约束的系数
+        # 这样可以更好地反映车辆的运动趋势，提供更及时的避障方向
+        
+        for t in range(min(P.T, P.obstacle_horizon)):
+            # 使用预测轨迹中对应时间步的位置作为线性化点
+            # 如果是第一次规划，z_bar可能等于参考轨迹，仍然比仅用初始状态更准确
+            robot_predicted_pos = self.z_bar[:2, t]  # 使用预测轨迹位置作为线性化点
+            
+            # Calculate distances to all obstacles based on predicted position
+            distances = []
+            for obs_id, obstacle in P.obstacles.items():
+                if treat_as_static:
+                    obs_pos = obstacle.positions[0][0]
+                else:
+                    obs_pos = obstacle.positions[0][min(t, len(obstacle.positions[0])-1)]
+                
+                dist = np.linalg.norm(robot_predicted_pos - obs_pos)
+                distances.append((dist, obs_id, obs_pos))
+            
+            # Sort by distance and get closest obstacles
+            distances.sort(key=lambda x: x[0])
+            closest_obstacles = distances[:1]  # 考虑最近的2个障碍物，增强避障能力
+            
+            # Add linear constraints for closest obstacles
+            for dist, obs_id, obs_pos in closest_obstacles:
+                # 增加避障范围，更早开始避障动作
+                if dist > 25:
+                    continue
+                
+                # Avoid numerical issues
+                if dist >= 0.001:
+                    # 基于预测轨迹计算避障方向向量
+                    diff = robot_predicted_pos - obs_pos
+                    a_fixed = diff / dist  # 基于预测位置的单位向量
+                    safe_distance = 4.0  # 远距离时使用较小的安全距离
+                    
+                    # Convert to CasADi DM - 这些现在基于预测轨迹
+                    a_ca = ca.DM(a_fixed)
+                    obs_pos_ca = ca.DM(obs_pos)
+                    
+                    # 添加线性约束：a_predicted · (x[t] - obs_pos) >= safe_distance
+                    # 基于预测轨迹的线性约束，能更好地预测避障方向
+                    constraint_expr = a_ca[0] * (self.z[0, t] - obs_pos_ca[0]) + a_ca[1] * (self.z[1, t] - obs_pos_ca[1])
+                    self.opti.subject_to(constraint_expr >= safe_distance)
+
     
     def setup_solver(self):
         """Setup solver options"""
@@ -562,6 +632,17 @@ class MPCProblem:
             "warm_start_init_point": "yes"  # Enable warm start
         }
         
+        # s_opts = {
+        #             "acceptable_tol": 1e-4,
+        #             "acceptable_iter": 5,
+        #             "acceptable_obj_change_tol": 1e-4,
+        #             "print_level": 0, 
+        #             "max_iter": 1000,  # 设置最大迭代次数
+        #             "hessian_approximation": "limited-memory",  # 使用有限记忆BFGS方法
+        #             "linear_solver": "mumps",  # 使用MUMPS求解器
+        #             "error_on_fail": True  # 如果求解失败，抛出异常
+                    
+        #         }       
         self.opti.solver("ipopt", p_opts, s_opts)
     
     def solve(self):
@@ -742,11 +823,11 @@ class MPCController:
         
         # 多帧规划相关属性
         self.frame_counter = 0            # 帧计数器
-        self.frame_update_rate = 3        # 每隔多少帧重新规划
+        self.frame_update_rate = 1        # 每隔多少帧重新规划
         self.control_index = 0            # 当前执行的控制量索引
         self.stored_controls = None       # 存储规划得到的控制量序列 [a_opt, delta_opt]
 
-    def update(self, ref_path, initial_state=None, consider_obstacles=True, acc_mode='accelerate', show_plot=False):
+    def update(self, ref_path, initial_state=None, consider_obstacles=True, acc_mode='accelerate', show_plot=False, use_linear_constraints=None):
         """
         Update MPC controller
         :param ref_path: reference path
@@ -754,6 +835,7 @@ class MPCController:
         :param consider_obstacles: whether to consider obstacles
         :param acc_mode: acceleration mode ('accelerate', 'decelerate', 'maintain')
         :param show_plot: whether to display plots
+        :param use_linear_constraints: whether to use linear obstacle constraints (None=use P.use_linear_obstacle_constraints)
         :return: target index and optimized trajectory
         """
         self.ref_path = ref_path
@@ -784,7 +866,7 @@ class MPCController:
             # 执行MPC优化，得到控制序列
             self.a_opt, self.delta_opt, x_opt, y_opt, yaw_opt, v_opt = linear_mpc_control(
                 z_ref, z0, self.a_opt, self.delta_opt, 
-                consider_obstacles=consider_obstacles
+                consider_obstacles=consider_obstacles, use_linear_constraints=use_linear_constraints
             )
             
             # 存储优化结果供后续帧使用
@@ -996,8 +1078,8 @@ class MPCController:
         plt.plot(self.ref_path.cx, self.ref_path.cy, 'g-', linewidth=1, label='Reference Path')
         
         # 绘制参考轨迹
-        # if z_ref is not None:
-        #     plt.plot(z_ref[0, :], z_ref[1, :], 'r-', linewidth=2, label='Reference Trajectory')
+        if z_ref is not None:
+            plt.plot(z_ref[0, :], z_ref[1, :], 'r-', linewidth=2, label='ref_plan')
         
         # 绘制优化轨迹（如果有）
         if x_opt is not None and y_opt is not None:

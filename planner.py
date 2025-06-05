@@ -22,6 +22,10 @@ import time
 from functools import lru_cache
 import numba
 
+# 全局变量存储MPC轨迹生成时间
+mpc_time_records = []
+step_counter = 0
+
 @lru_cache(maxsize=1)
 def get_transformer(lon_origin, lat_origin):
     proj_string = f"+proj=tmerc +lon_0={lon_origin} +lat_0={lat_origin} +ellps=WGS84"
@@ -197,7 +201,10 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         ego_decision: 决策结果
         use_mpc: 是否使用MPC生成轨迹，默认为False
     """
-    global ref_lons, ref_lats, ref_s, vehicle_init_pos, mpc_controller
+    global ref_lons, ref_lats, ref_s, vehicle_init_pos, mpc_controller, mpc_time_records, step_counter
+    
+    # 步数计数器
+    step_counter += 1
     
     # 深拷贝输入数据，避免修改原始数据
     DataFromEgo = copy.deepcopy(state_data)
@@ -250,7 +257,22 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         # plt.close()
 
         end_time2 = time.time()
-        rospy.loginfo(f"generate_mpc_trajectory time: {end_time2 - start_time2} seconds")
+        mpc_generation_time = end_time2 - start_time2
+        
+        # 记录MPC轨迹生成时间
+        mpc_time_records.append({
+            'step': step_counter,
+            'time': mpc_generation_time,
+            'timestamp': time.time()
+        })
+        
+        rospy.loginfo(f"generate_mpc_trajectory time: {mpc_generation_time} seconds")
+        
+        # 每10步或达到100步时绘制时间变化曲线
+        print('step_counter',step_counter)
+        if step_counter == 200:
+            plot_mpc_time_curve()
+        
     else:
         # 使用简单的匀加速模型生成局部坐标系下的轨迹
         time_steps = 50
@@ -260,7 +282,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
 
     
     # 统一进行轨迹加密
-    x_local_dense, y_local_dense, yaw_local_dense = densify_trajectory(x_local, y_local, yaw_local, max_distance=0.2)
+    x_local_dense, y_local_dense, yaw_local_dense, v_local_dense = densify_trajectory(x_local, y_local, yaw_local, v_local, max_distance=0.2)
     
     # 统一将加密后的轨迹从车辆坐标系旋转到全局坐标系
     x_global_dense, y_global_dense = coordinate_transform(x_local_dense, y_local_dense, target_heading=ego_state.heading)
@@ -341,7 +363,11 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         point.y = y_local_dense[i] * 100
         point.gx = gx_dense[i]
         point.gy = gy_dense[i]
-        point.speed = base_point.speed
+        # 使用加密后的速度数据，如果没有则使用基础速度
+        if 'v_local_dense' in locals() and i < len(v_local_dense):
+            point.speed = float(v_local_dense[i])
+        else:
+            point.speed = base_point.speed
         point.heading = heading_global_dense[i]
         point.roadtype = base_point.roadtype
         point.turnlight = base_point.turnlight
@@ -364,6 +390,11 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
     ego_decision.timestamp = int(rospy.Time.now().to_sec() * 1000)
     
     rospy.loginfo("Generated trajectory with {} points".format(len(trajectory_points)))
+    
+    # 定期保存MPC时间数据（每50步保存一次）
+    if step_counter % 400 == 0:
+        save_mpc_time_data()
+        rospy.loginfo(f"已完成第 {step_counter} 步规划")
     
     return ego_plan, ego_decision
     
@@ -434,7 +465,7 @@ def convert_reference_to_local(ego_state, ref_lons, ref_lats):
     
     # 选择前后各250个点
     start_idx = max(0, front_indices[min_front_idx] - 100)
-    end_idx = min(len(ref_x_local), front_indices[min_front_idx] + 1000)
+    end_idx = min(len(ref_x_local), front_indices[min_front_idx] + 1500)
     
     # 确保有足够的点
     if end_idx - start_idx < 10:
@@ -525,7 +556,7 @@ def generate_mpc_trajectory(ego_state, local_ref_path):
     
     # 使用MPC控制器生成轨迹
     # try:
-    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=False, acc_mode='accelerate',show_plot=True)
+    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=True, acc_mode='accelerate',show_plot=True,use_linear_constraints=True)
     
     # if x_opt is None or y_opt is None or yaw_opt is None or v_opt is None:
     #     rospy.logwarn("MPC optimization failed, falling back to simple trajectory")
@@ -585,7 +616,7 @@ def generate_trajectory(ego_state, time_steps=50, a=2, delta=0):
     
     return x, y, yaw, v
 
-def densify_trajectory(x, y, yaw, max_distance=0.2):
+def densify_trajectory(x, y, yaw, v=None, max_distance=0.2):
     """densify trajectory to ensure the distance between adjacent points does not exceed a specified value (vectorized implementation)"""
     # 计算所有相邻点之间的距离
     points = np.column_stack((x, y))
@@ -594,7 +625,10 @@ def densify_trajectory(x, y, yaw, max_distance=0.2):
     
     # 如果没有需要插值的点，直接返回原始轨迹
     if np.all(distances <= max_distance):
-        return x, y, yaw
+        if v is not None:
+            return x, y, yaw, v
+        else:
+            return x, y, yaw
     
     # 计算每段需要插入的点数
     num_segments = len(distances)
@@ -605,11 +639,15 @@ def densify_trajectory(x, y, yaw, max_distance=0.2):
     x_dense = np.zeros(total_points)
     y_dense = np.zeros(total_points)
     yaw_dense = np.zeros(total_points)
+    if v is not None:
+        v_dense = np.zeros(total_points)
     
     # 填充第一个点
     x_dense[0] = x[0]
     y_dense[0] = y[0]
     yaw_dense[0] = yaw[0]
+    if v is not None:
+        v_dense[0] = v[0]
     
     # 当前填充位置索引
     current_idx = 1
@@ -619,6 +657,8 @@ def densify_trajectory(x, y, yaw, max_distance=0.2):
         # 当前段的起点和终点
         x1, y1, yaw1 = x[i], y[i], yaw[i]
         x2, y2, yaw2 = x[i+1], y[i+1], yaw[i+1]
+        if v is not None:
+            v1, v2 = v[i], v[i+1]
         
         # 需要插入的点数
         n_insert = num_points_to_insert[i]
@@ -631,11 +671,15 @@ def densify_trajectory(x, y, yaw, max_distance=0.2):
             x_interp = x1 + (x2 - x1) * ratios
             y_interp = y1 + (y2 - y1) * ratios
             yaw_interp = yaw1 + (yaw2 - yaw1) * ratios
+            if v is not None:
+                v_interp = v1 + (v2 - v1) * ratios
             
             # 填充插值点
             x_dense[current_idx:current_idx + n_insert] = x_interp
             y_dense[current_idx:current_idx + n_insert] = y_interp
             yaw_dense[current_idx:current_idx + n_insert] = yaw_interp
+            if v is not None:
+                v_dense[current_idx:current_idx + n_insert] = v_interp
             
             current_idx += n_insert
         
@@ -644,17 +688,170 @@ def densify_trajectory(x, y, yaw, max_distance=0.2):
             x_dense[current_idx] = x2
             y_dense[current_idx] = y2
             yaw_dense[current_idx] = yaw2
+            if v is not None:
+                v_dense[current_idx] = v2
             current_idx += 1
     
     # 填充最后一个点
     x_dense[current_idx] = x[-1]
     y_dense[current_idx] = y[-1]
     yaw_dense[current_idx] = yaw[-1]
+    if v is not None:
+        v_dense[current_idx] = v[-1]
     
     # 如果预分配的空间有多余，裁剪掉
     if current_idx + 1 < total_points:
         x_dense = x_dense[:current_idx + 1]
         y_dense = y_dense[:current_idx + 1]
         yaw_dense = yaw_dense[:current_idx + 1]
+        if v is not None:
+            v_dense = v_dense[:current_idx + 1]
     
-    return x_dense, y_dense, yaw_dense
+    if v is not None:
+        return x_dense, y_dense, yaw_dense, v_dense
+    else:
+        return x_dense, y_dense, yaw_dense
+
+def plot_mpc_time_curve():
+    """绘制MPC轨迹生成时间的变化曲线"""
+    global mpc_time_records
+    
+    if len(mpc_time_records) < 2:
+        return
+    
+    try:
+        # 提取数据
+        steps = [record['step'] for record in mpc_time_records]
+        times = [record['time'] for record in mpc_time_records]
+        
+        # 创建图形
+        plt.figure(figsize=(12, 8))
+        
+        # 绘制时间变化曲线
+        plt.subplot(2, 1, 1)
+        plt.plot(steps, times, 'b-', linewidth=2, label='MPC trajectory generation time')
+        plt.plot(steps, times, 'ro', markersize=4)
+        plt.xlabel('Planning steps')
+        plt.ylabel('Time (seconds)')
+        plt.title('MPC trajectory generation time change curve')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # 添加统计信息
+        avg_time = np.mean(times)
+        max_time = np.max(times)
+        min_time = np.min(times)
+        std_time = np.std(times)
+        
+        plt.axhline(y=avg_time, color='g', linestyle='--', alpha=0.7, label=f'Average time: {avg_time:.4f}s')
+        plt.axhline(y=max_time, color='r', linestyle='--', alpha=0.7, label=f'Maximum time: {max_time:.4f}s')
+        plt.axhline(y=min_time, color='orange', linestyle='--', alpha=0.7, label=f'Minimum time: {min_time:.4f}s')
+        plt.legend()
+        
+        # 绘制时间直方图
+        plt.subplot(2, 1, 2)
+        plt.hist(times, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
+        plt.xlabel('Time (seconds)')
+        plt.ylabel('Frequency')
+        plt.title('MPC trajectory generation time distribution histogram')
+        plt.grid(True, alpha=0.3)
+        
+        # 添加统计文本
+        stats_text = f'Statistics:\nAverage time: {avg_time:.4f}s\nStandard deviation: {std_time:.4f}s\nMaximum time: {max_time:.4f}s\nMinimum time: {min_time:.4f}s\nTotal steps: {len(times)}'
+        plt.text(0.98, 0.98, stats_text, transform=plt.gca().transAxes, 
+                verticalalignment='top', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        plt.tight_layout()
+        
+        # 保存图片
+        timestamp = int(time.time())
+        filename = f'mpc_time_analysis_{timestamp}.png'
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        rospy.loginfo(f"MPC time analysis image has been saved: {filename}")
+        
+        # 显示图片（可选，在某些环境下可能不工作）
+        # plt.show()
+        
+        plt.close()
+        
+    except Exception as e:
+        rospy.logerr(f"绘制MPC时间曲线时出错: {e}")
+
+def save_mpc_time_data():
+    """将MPC时间数据保存到CSV文件"""
+    global mpc_time_records
+    
+    if not mpc_time_records:
+        return
+    
+    try:
+        timestamp = int(time.time())
+        filename = f'mpc_time_data_{timestamp}.csv'
+        
+        with open(filename, 'w', newline='') as csvfile:
+            fieldnames = ['step', 'time', 'timestamp']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            writer.writeheader()
+            for record in mpc_time_records:
+                writer.writerow(record)
+        
+        rospy.loginfo(f"MPC时间数据已保存到: {filename}")
+        
+    except Exception as e:
+        rospy.logerr(f"保存MPC时间数据时出错: {e}")
+
+def get_mpc_time_statistics():
+    """获取MPC时间统计信息"""
+    global mpc_time_records
+    
+    if not mpc_time_records:
+        return None
+    
+    times = [record['time'] for record in mpc_time_records]
+    
+    stats = {
+        'count': len(times),
+        'mean': np.mean(times),
+        'std': np.std(times),
+        'min': np.min(times),
+        'max': np.max(times),
+        'median': np.median(times),
+        'q25': np.percentile(times, 25),
+        'q75': np.percentile(times, 75)
+    }
+    
+    return stats
+
+def export_mpc_analysis():
+    """导出完整的MPC时间分析"""
+    global mpc_time_records
+    
+    if not mpc_time_records:
+        rospy.logwarn("没有MPC时间记录数据")
+        return
+    
+    try:
+        # 保存数据到CSV
+        save_mpc_time_data()
+        
+        # 绘制最终的时间分析图
+        plot_mpc_time_curve()
+        
+        # 打印统计信息
+        stats = get_mpc_time_statistics()
+        if stats:
+            rospy.loginfo("=== MPC时间统计信息 ===")
+            rospy.loginfo(f"总规划步数: {stats['count']}")
+            rospy.loginfo(f"平均时间: {stats['mean']:.4f}s")
+            rospy.loginfo(f"标准差: {stats['std']:.4f}s")
+            rospy.loginfo(f"最小时间: {stats['min']:.4f}s")
+            rospy.loginfo(f"最大时间: {stats['max']:.4f}s")
+            rospy.loginfo(f"中位数: {stats['median']:.4f}s")
+            rospy.loginfo(f"25%分位数: {stats['q25']:.4f}s")
+            rospy.loginfo(f"75%分位数: {stats['q75']:.4f}s")
+            rospy.loginfo("====================")
+            
+    except Exception as e:
+        rospy.logerr(f"导出MPC分析时出错: {e}")
