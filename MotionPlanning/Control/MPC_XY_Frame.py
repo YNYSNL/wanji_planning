@@ -14,6 +14,7 @@ import copy
 import casadi as ca
 import logging
 from datetime import datetime
+import time
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) +
                 "/../../MotionPlanning/")
@@ -27,7 +28,7 @@ class P:
     # System config
     NX = 4  # state vector: z = [x, y, v, phi]
     NU = 2  # input vector: u = [acceleration, steer]
-    T = 15  # finite time horizon length that is the same as PLAN_HORIZON
+    T = 20  # finite time horizon length that is the same as PLAN_HORIZON
 
     # MPC config
     Q = np.diag([1.0, 1.0, 1.0, 1.0])  # penalty for states
@@ -38,12 +39,12 @@ class P:
     dist_stop = 1  # stop permitted when dist to goal < dist_stop
     speed_stop = 0.5 / 3.6  # stop permitted when speed < speed_stop
     time_max = 500.0  # max simulation time
-    iter_max = 5  # max iteration
+    iter_max = 2  # max iteration
     target_speed = 40.0 / 3.6  # target speed
     N_IND = 50  # search index number
     dt = 0.3  # time step
     d_dist = 1.0  # dist step
-    du_res = 0.1  # threshold for stopping iteration
+    du_res = 0.2  # threshold for stopping iteration
 
     # vehicle config
     RF = 3.3  # [m] distance from rear to vehicle front end of vehicle
@@ -62,7 +63,7 @@ class P:
 
     num_obstacles = 1  # number of obstacles
     obstacles = dict()  # obstacles: {id: [x, y, w, l]}
-    obstacle_horizon = 20  # horizon length for obstacle avoidance
+    obstacle_horizon = 15  # horizon length for obstacle avoidance
     num_modes = 1  # number of modes for Reeds-Shepp path
     treat_obstacles_as_static = True  # treat obstacles as static
     use_linear_obstacle_constraints = True  # use linear constraints for obstacles (faster computation)
@@ -274,6 +275,7 @@ def linear_mpc_control(z_ref, z0, a_old, delta_old, consider_obstacles=True, use
     :param use_linear_constraints: whether to use linear obstacle constraints (None=use P.use_linear_obstacle_constraints)
     :return: acceleration and delta strategy based on current information
     """
+
     if a_old is None or delta_old is None:
         a_old = [0.0] * P.T
         delta_old = [0.0] * P.T
@@ -289,13 +291,17 @@ def linear_mpc_control(z_ref, z0, a_old, delta_old, consider_obstacles=True, use
     x, y, yaw, v = None, None, None, None
 
     for k in range(P.iter_max):
+        
         # Predict states in T steps
         z_bar = predict_states_in_T_step(z0, a_old, delta_old, z_ref)
         a_rec, delta_rec = a_old[:], delta_old[:]
         
         # Create and solve MPC problem
         mpc_problem = MPCProblem(z_ref, z_bar, z0, delta_old, consider_obstacles)
+
+  
         a_old, delta_old, x, y, yaw, v = mpc_problem.solve()
+
         
         if a_old is None:
             # If optimization fails, use previous control inputs
@@ -310,7 +316,6 @@ def linear_mpc_control(z_ref, z0, a_old, delta_old, consider_obstacles=True, use
         if max(du_a_max, du_d_max) < P.du_res:
             logger.info(f"MPC iteration converged, iterations: {k+1}")
             break
-
     # 恢复全局配置
     P.use_linear_obstacle_constraints = original_setting
     
@@ -452,7 +457,7 @@ class MPCProblem:
         self.add_dynamics_constraints()
         self.add_state_constraints()
         self.add_control_constraints()
-        
+
         if self.consider_obstacles and P.obstacles is not None:
             if P.use_linear_obstacle_constraints:
                 self.add_linear_obstacle_constraints()
@@ -462,68 +467,83 @@ class MPCProblem:
                 logger.info("使用非线性障碍物约束")
     
     def define_objective(self):
-        """Define objective function"""
-        cost = 0.0
+        """Define objective function - optimized vectorized version"""
         
-        # State and control costs
-        for t in range(P.T):
-            # State error cost
-            state_error = self.z[:, t] - self.z_ref[:, t]
-            cost += ca.mtimes(ca.mtimes(state_error.T, ca.DM(P.Q)), state_error)
-            
-            # Control cost
-            cost += ca.mtimes(ca.mtimes(self.u[:, t].T, ca.DM(P.R)), self.u[:, t])
-            
-            # Control rate cost
-            if t < P.T - 1:
-                du = self.u[:, t+1] - self.u[:, t]
-                cost += ca.mtimes(ca.mtimes(du.T, ca.DM(P.Rd)), du)
+        # Vectorized state error cost - replaces T individual calculations
+        state_errors = self.z[:, :P.T] - self.z_ref[:, :P.T]  # Shape: (4, T)
+        Q_ca = ca.DM(P.Q)
+        state_cost = ca.trace(ca.mtimes(ca.mtimes(state_errors.T, Q_ca), state_errors))
+        
+        # Vectorized control cost - replaces T individual calculations  
+        R_ca = ca.DM(P.R)
+        control_cost = ca.trace(ca.mtimes(ca.mtimes(self.u[:, :P.T].T, R_ca), self.u[:, :P.T]))
+        
+        # Vectorized control rate cost - replaces (T-1) individual calculations
+        control_rate_cost = 0.0
+        if P.T > 1:
+            du = self.u[:, 1:P.T] - self.u[:, 0:P.T-1]  # Shape: (2, T-1)
+            Rd_ca = ca.DM(P.Rd)
+            control_rate_cost = ca.trace(ca.mtimes(ca.mtimes(du.T, Rd_ca), du))
         
         # Terminal cost
         final_state_error = self.z[:, P.T] - self.z_ref[:, P.T]
-        cost += ca.mtimes(ca.mtimes(final_state_error.T, ca.DM(P.Qf)), final_state_error)
+        Qf_ca = ca.DM(P.Qf)
+        terminal_cost = ca.mtimes(ca.mtimes(final_state_error.T, Qf_ca), final_state_error)
+        
+        # Total cost
+        total_cost = state_cost + control_cost + control_rate_cost + terminal_cost
         
         # Set objective
-        self.opti.minimize(cost)
+        self.opti.minimize(total_cost)
     
     def add_initial_state_constraint(self):
         """Add initial state constraint"""
         self.opti.subject_to(self.z[:, 0] == ca.DM(self.z0))
     
     def add_dynamics_constraints(self):
-        """Add dynamics constraints"""
+        """Add dynamics constraints - optimized batch version"""
+        # Pre-compute all linear models in batch to reduce function call overhead
+        A_matrices = []
+        B_matrices = []
+        C_vectors = []
+        
+        # Batch computation of linear discrete models
         for t in range(P.T):
             A, B, C = calc_linear_discrete_model(self.z_bar[2, t], self.z_bar[3, t], self.d_bar[t])
-            # Convert to CasADi DM
-            A_ca = ca.DM(A)
-            B_ca = ca.DM(B)
-            C_ca = ca.DM(C)
-            
-            # Add dynamics constraint
-            self.opti.subject_to(self.z[:, t+1] == ca.mtimes(A_ca, self.z[:, t]) + ca.mtimes(B_ca, self.u[:, t]) + C_ca)
+            A_matrices.append(ca.DM(A))
+            B_matrices.append(ca.DM(B))
+            C_vectors.append(ca.DM(C))
+        
+        # Vectorized constraint addition - more efficient than individual constraints
+        for t in range(P.T):
+            # Add dynamics constraint using pre-computed matrices
+            self.opti.subject_to(self.z[:, t+1] == 
+                               ca.mtimes(A_matrices[t], self.z[:, t]) + 
+                               ca.mtimes(B_matrices[t], self.u[:, t]) + 
+                               C_vectors[t])
     
     def add_state_constraints(self):
         """Add state constraints"""
-        for t in range(P.T + 1):
-            # Speed constraints
-            self.opti.subject_to(self.z[2, t] <= P.speed_max)
-            self.opti.subject_to(self.z[2, t] >= P.speed_min)
+        # Speed constraints (compatible with older CasADi versions)
+        self.opti.subject_to(self.z[2, :] >= P.speed_min)
+        self.opti.subject_to(self.z[2, :] <= P.speed_max)
     
     def add_control_constraints(self):
-        """Add control constraints"""
-        for t in range(P.T):
-            # Acceleration constraints
-            self.opti.subject_to(self.u[0, t] <= P.acceleration_max)
-            self.opti.subject_to(self.u[0, t] >= -P.acceleration_max)
-            
-            # Steering constraints
-            self.opti.subject_to(self.u[1, t] <= P.steer_max)
-            self.opti.subject_to(self.u[1, t] >= -P.steer_max)
-            
-            # Steering rate constraints
-            if t < P.T - 1:
-                self.opti.subject_to(self.u[1, t+1] - self.u[1, t] <= P.steer_change_max * P.dt)
-                self.opti.subject_to(self.u[1, t+1] - self.u[1, t] >= -P.steer_change_max * P.dt)
+        """Add control constraints - optimized vectorized version (CasADi compatible)"""
+        # Vectorized acceleration constraints - replaces 2*T individual constraints
+        self.opti.subject_to(self.u[0, :] >= -P.acceleration_max)
+        self.opti.subject_to(self.u[0, :] <= P.acceleration_max)
+        
+        # Vectorized steering constraints - replaces 2*T individual constraints  
+        self.opti.subject_to(self.u[1, :] >= -P.steer_max)
+        self.opti.subject_to(self.u[1, :] <= P.steer_max)
+        
+        # Vectorized steering rate constraints - replaces 2*(T-1) individual constraints
+        if P.T > 1:
+            du_steer = self.u[1, 1:] - self.u[1, :-1]  # Calculate steering differences
+            max_steer_change = P.steer_change_max * P.dt
+            self.opti.subject_to(du_steer >= -max_steer_change)
+            self.opti.subject_to(du_steer <= max_steer_change)
     
     def add_obstacle_constraints(self):
         """Add obstacle constraints"""
@@ -631,18 +651,19 @@ class MPCProblem:
             "print_level": 0,
             "warm_start_init_point": "yes"  # Enable warm start
         }
-        
         # s_opts = {
+        #             "max_iter": 500,
+        #             "tol": 1e-3,
+        #             "print_level": 0,
+        #             "warm_start_init_point": "yes",  # Enable warm start
+        #             # config for faster convergence
         #             "acceptable_tol": 1e-4,
-        #             "acceptable_iter": 5,
+        #             "acceptable_iter": 10,
         #             "acceptable_obj_change_tol": 1e-4,
-        #             "print_level": 0, 
-        #             "max_iter": 1000,  # 设置最大迭代次数
-        #             "hessian_approximation": "limited-memory",  # 使用有限记忆BFGS方法
-        #             "linear_solver": "mumps",  # 使用MUMPS求解器
-        #             "error_on_fail": True  # 如果求解失败，抛出异常
-                    
-        #         }       
+        #             "max_cpu_time": 10.0,  # Set a reasonable timeout
+        #             "max_iter": 1000,  # Increase max iterations for robustness
+        #             "hessian_approximation": "limited-memory",  # Use limited-memory BFGS for better performance
+        #         }    
         self.opti.solver("ipopt", p_opts, s_opts)
     
     def solve(self):
@@ -856,19 +877,20 @@ class MPCController:
             # 重置计数器和控制索引
             self.frame_counter = 0
             self.control_index = 0
-            
+
+          
             # 计算参考轨迹
             speed_profile = calc_speed_profile(self.ref_path.cx, self.ref_path.cy, 
                                              self.ref_path.cyaw, self.target_speed)
             z_ref, target_ind = calc_ref_trajectory_in_T_step(self.node, self.ref_path,
                                                             speed_profile, acc_mode=acc_mode)
-            
+                      
             # 执行MPC优化，得到控制序列
             self.a_opt, self.delta_opt, x_opt, y_opt, yaw_opt, v_opt = linear_mpc_control(
                 z_ref, z0, self.a_opt, self.delta_opt, 
                 consider_obstacles=consider_obstacles, use_linear_constraints=use_linear_constraints
             )
-            
+
             # 存储优化结果供后续帧使用
             if self.a_opt is not None and self.delta_opt is not None:
                 self.stored_controls = {
@@ -1045,27 +1067,34 @@ class MPCController:
                 y_opt = y_pred
                 yaw_opt = yaw_pred
                 v_opt = v_pred
+
         
         # Update vehicle state
+
         self.node.update(self.a_exc, self.delta_exc, 1.0)
-        
+
+       
         # Update trajectory records
         self.x.append(self.node.x)
         self.y.append(self.node.y)
         self.yaw.append(self.node.yaw)
         self.v.append(self.node.v)
+        self.v.append(self.node.v)
+        
+        self.v.append(self.node.v)          
         
         # 绘图部分，根据show_plot参数决定是否显示
+
         if show_plot:
             self.plot_current_state(z_ref, x_opt, y_opt)
-        
+
+     
         # 确保返回的轨迹非空
         if x_opt is None or y_opt is None or len(x_opt) == 0 or len(y_opt) == 0:
             x_opt = [self.node.x]
             y_opt = [self.node.y]
             yaw_opt = [self.node.yaw]
             v_opt = [self.node.v]
-        
         return target_ind, x_opt, y_opt, yaw_opt, v_opt
     
     def plot_current_state(self, z_ref, x_opt=None, y_opt=None):

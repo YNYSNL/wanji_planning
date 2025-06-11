@@ -246,7 +246,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         # 使用MPC生成局部坐标系下的轨迹
         start_time2 = time.time()
         x_local, y_local, yaw_local, v_local = generate_mpc_trajectory(ego_state, local_ref_path)
-        print(x_local[0],y_local[0])
+        # print(x_local[0],y_local[0])
         # plt.plot(local_ref_path.cx, local_ref_path.cy, label='Trajectory Points',color='blue')
         # plt.plot(x_local, y_local, label='Trajectory Points',color='red')
 
@@ -270,8 +270,8 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         
         # 每10步或达到100步时绘制时间变化曲线
         print('step_counter',step_counter)
-        if step_counter == 200:
-            plot_mpc_time_curve()
+        # if step_counter == 150:
+        #     plot_mpc_time_curve()
         
     else:
         # 使用简单的匀加速模型生成局部坐标系下的轨迹
@@ -364,10 +364,10 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         point.gx = gx_dense[i]
         point.gy = gy_dense[i]
         # 使用加密后的速度数据，如果没有则使用基础速度
-        if 'v_local_dense' in locals() and i < len(v_local_dense):
-            point.speed = float(v_local_dense[i])
-        else:
-            point.speed = base_point.speed
+        # if 'v_local_dense' in locals() and i < len(v_local_dense):
+        #     point.speed = float(v_local_dense[i])
+        # else:
+        point.speed = base_point.speed
         point.heading = heading_global_dense[i]
         point.roadtype = base_point.roadtype
         point.turnlight = base_point.turnlight
@@ -392,9 +392,10 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
     rospy.loginfo("Generated trajectory with {} points".format(len(trajectory_points)))
     
     # 定期保存MPC时间数据（每50步保存一次）
-    if step_counter % 400 == 0:
-        save_mpc_time_data()
-        rospy.loginfo(f"已完成第 {step_counter} 步规划")
+    # if step_counter == 150:
+    #     save_mpc_time_data()
+    #     rospy.loginfo(f"已完成第 {step_counter} 步规划")
+    # rospy.loginfo(f"step_counter: {step_counter}")
     
     return ego_plan, ego_decision
     
@@ -556,8 +557,7 @@ def generate_mpc_trajectory(ego_state, local_ref_path):
     
     # 使用MPC控制器生成轨迹
     # try:
-    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=True, acc_mode='accelerate',show_plot=True,use_linear_constraints=True)
-    
+    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=True, acc_mode='accelerate',show_plot=False,use_linear_constraints=True)
     # if x_opt is None or y_opt is None or yaw_opt is None or v_opt is None:
     #     rospy.logwarn("MPC optimization failed, falling back to simple trajectory")
     #     # 如果MPC优化失败，使用简单轨迹

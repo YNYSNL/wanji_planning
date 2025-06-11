@@ -332,7 +332,7 @@ def offline_test():
     
     # 打开bag文件
     # file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
-    file_path = '/home/admin/Downloads/2025-04-17-13-05-25.bag' 
+    file_path = '/home/admin/Downloads/2025-06-06-09-18-01.bag' 
     bag = rosbag.Bag(file_path, 'r')
     
     # 按时间戳组织数据
@@ -343,6 +343,9 @@ def offline_test():
              '/actuator', '/hdroutetoglobal']
     
     print("Reading bag file...")
+    frame_count = 0
+    max_frames = 610  # 只保存前600帧数据
+    
     for topic, msg, t in bag.read_messages(topics=topics):
         timestamp = t.to_sec()
         # 将时间戳四舍五入到最近的0.1秒，以便对齐不同话题的数据
@@ -350,6 +353,13 @@ def offline_test():
         
         if rounded_timestamp not in frame_timestamps:
             frame_timestamps[rounded_timestamp] = {}
+            frame_count += 1
+            
+            # 只保存前600帧数据
+            if frame_count > max_frames:
+                print(f"Reached maximum frames limit ({max_frames}), stopping data collection...")
+                break
+                
         frame_timestamps[rounded_timestamp][topic] = msg
     
     bag.close()
@@ -380,7 +390,7 @@ def offline_test():
 
         print(data_status.values())       
         # 检查数据是否完整并进行规划
-        if i < 350:
+        if i < 400 or i > 610:
             continue
         
         if all(data_status.values()):
