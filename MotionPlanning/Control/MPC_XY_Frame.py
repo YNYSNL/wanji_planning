@@ -546,37 +546,90 @@ class MPCProblem:
             self.opti.subject_to(du_steer <= max_steer_change)
     
     def add_obstacle_constraints(self):
-        """Add obstacle constraints"""
+        """Add obstacle constraints with improved forward vehicle avoidance"""
         treat_as_static = P.treat_obstacles_as_static
         for t in range(min(P.T, P.obstacle_horizon)):
-            # Calculate distances to all obstacles
-            distances = []
+            robot_pos = self.z_bar[:2, t]
+            robot_yaw = self.z_bar[3, t]  # Vehicle heading angle
+            
+            # Calculate threat score for all obstacles
+            threat_obstacles = []
             for obs_id, obstacle in P.obstacles.items():
                 if treat_as_static:
                     obs_pos = obstacle.positions[0][0]
                 else:
                     obs_pos = obstacle.positions[0][t]
-                robot_current_pos = self.z_bar[:2, t]  # Use current position for distance calculation
-                dist = np.linalg.norm(robot_current_pos - obs_pos)
-                distances.append((dist, obs_id, obs_pos))
-            
-            # Sort by distance and get closest obstacle
-            distances.sort(key=lambda x: x[0])
-            # 考虑最近的几个障碍物，可以调整数量
-            closest_obstacles = distances[:1]  # 考虑最近的3个障碍物
-            
-            # Add constraints for closest obstacles
-            for dist, obs_id, obs_pos in closest_obstacles:
-                # Calculate unit vector from obstacle to robot
-                diff = self.z_bar[:2, t] - obs_pos
-
-                if dist > 20:
+                
+                # Calculate relative position vector
+                relative_pos = obs_pos - robot_pos
+                
+                # Vehicle forward direction unit vector
+                forward_vec = np.array([np.cos(robot_yaw), np.sin(robot_yaw)])
+                lateral_vec = np.array([-np.sin(robot_yaw), np.cos(robot_yaw)])
+                
+                # Project relative position onto vehicle coordinate system
+                longitudinal_dist = np.dot(relative_pos, forward_vec)  # Forward distance
+                lateral_dist = abs(np.dot(relative_pos, lateral_vec))   # Lateral distance
+                
+                # Only consider obstacles in front of the vehicle
+                if longitudinal_dist <= 0:
                     continue
                 
+                # Classify obstacle type based on lateral distance
+                if lateral_dist <= 2.5:  # Same lane (车道宽度约3.5米，考虑车宽2米)
+                    # Same lane vehicle - high priority, use distance-based threat
+                    if longitudinal_dist > 50:  # Too far ahead to matter
+                        continue
+                    # For same-lane vehicles, closer = higher threat (inverse relationship)
+                    threat_score = 100.0 - longitudinal_dist  # Higher score for closer vehicles
+                    vehicle_type = "same_lane"
+                elif lateral_dist <= 4.5:  # Adjacent lane
+                    # Adjacent lane vehicle - medium priority  
+                    if longitudinal_dist > 35:
+                        continue
+                    threat_score = 50.0 + longitudinal_dist + lateral_dist  # Lower priority
+                    vehicle_type = "adjacent_lane"
+                else:  # Far lateral distance
+                    # Distant lane or roadside - low priority
+                    if longitudinal_dist > 25:
+                        continue  
+                    threat_score = 200.0 + longitudinal_dist + lateral_dist  # Lowest priority
+                    vehicle_type = "distant"
+                
+                threat_obstacles.append((threat_score, obs_id, obs_pos, longitudinal_dist, lateral_dist, vehicle_type))
+            
+            # Sort by threat score (lower score = higher threat for same lane vehicles)
+            threat_obstacles.sort(key=lambda x: x[0])
+            
+            # Consider more obstacles to ensure proper avoidance
+            max_obstacles = min(4, len(threat_obstacles))  # Consider up to 4 obstacles
+            closest_obstacles = threat_obstacles[:max_obstacles]
+            
+            # Add constraints for threatening obstacles
+            for threat_score, obs_id, obs_pos, long_dist, lat_dist, vehicle_type in closest_obstacles:
+                # Calculate avoidance direction
+                diff = robot_pos - obs_pos
+                euclidean_dist = np.linalg.norm(diff)
+                
                 # Avoid numerical issues
-                if dist >= 0.001:
-                    a = diff / dist  # unit vector
-                    safe_distance = 3.5
+                if euclidean_dist >= 0.001:
+                    a = diff / euclidean_dist  # unit vector from obstacle to robot
+                    
+                    # Adaptive safe distance based on vehicle type and position
+                    if vehicle_type == "same_lane":
+                        # Same lane vehicles need larger safe distance
+                        base_safe_distance = 4.5  # Increased from 3.0
+                        # Closer vehicles need even larger safety margin
+                        distance_factor = max(1.0, (20.0 - long_dist) / 20.0)
+                        safe_distance = base_safe_distance * distance_factor
+                    elif vehicle_type == "adjacent_lane":
+                        # Adjacent lane vehicles need moderate safe distance
+                        base_safe_distance = 3.0
+                        distance_factor = max(0.7, (15.0 - long_dist) / 15.0)
+                        safe_distance = base_safe_distance * distance_factor
+                    else:  # distant
+                        # Distant vehicles need minimal safe distance
+                        safe_distance = 2.0
                     
                     # Convert to CasADi DM
                     a_ca = ca.DM(a)
@@ -586,56 +639,78 @@ class MPCProblem:
                     constraint_expr = a_ca[0] * (self.z[0, t] - obs_pos_ca[0]) + a_ca[1] * (self.z[1, t] - obs_pos_ca[1])
                     self.opti.subject_to(constraint_expr >= safe_distance)
                     
-                    # logger.info(f"添加避障约束 t={t}, obs_id={obs_id}, dist={dist:.2f}m")
+                    # logger.info(f"避障约束 t={t}, obs_id={obs_id}, type={vehicle_type}, long={long_dist:.1f}m, lat={lat_dist:.1f}m, safe_dist={safe_distance:.1f}m")
     
     def add_linear_obstacle_constraints(self):
-        """Add linearized obstacle constraints for faster computation using previous trajectory"""
+        """Add linearized obstacle constraints with forward direction projection"""
         treat_as_static = P.treat_obstacles_as_static
         
-        # 使用上一次规划结果的预测轨迹来计算线性化避障约束的系数
-        # 这样可以更好地反映车辆的运动趋势，提供更及时的避障方向
-        
         for t in range(min(P.T, P.obstacle_horizon)):
-            # 使用预测轨迹中对应时间步的位置作为线性化点
-            # 如果是第一次规划，z_bar可能等于参考轨迹，仍然比仅用初始状态更准确
-            robot_predicted_pos = self.z_bar[:2, t]  # 使用预测轨迹位置作为线性化点
+            robot_pos = self.z_bar[:2, t]
+            robot_yaw = self.z_bar[3, t]  # Vehicle heading angle
             
-            # Calculate distances to all obstacles based on predicted position
-            distances = []
+            # Calculate threat score for all obstacles using predicted trajectory
+            threat_obstacles = []
             for obs_id, obstacle in P.obstacles.items():
                 if treat_as_static:
                     obs_pos = obstacle.positions[0][0]
                 else:
                     obs_pos = obstacle.positions[0][min(t, len(obstacle.positions[0])-1)]
                 
-                dist = np.linalg.norm(robot_predicted_pos - obs_pos)
-                distances.append((dist, obs_id, obs_pos))
-            
-            # Sort by distance and get closest obstacles
-            distances.sort(key=lambda x: x[0])
-            closest_obstacles = distances[:1]  # 考虑最近的2个障碍物，增强避障能力
-            
-            # Add linear constraints for closest obstacles
-            for dist, obs_id, obs_pos in closest_obstacles:
-                # 增加避障范围，更早开始避障动作
-                if dist > 25:
+                # Calculate relative position vector
+                relative_pos = obs_pos - robot_pos
+                
+                # Vehicle forward direction unit vector
+                forward_vec = np.array([np.cos(robot_yaw), np.sin(robot_yaw)])
+                lateral_vec = np.array([-np.sin(robot_yaw), np.cos(robot_yaw)])
+                
+                # Project relative position onto vehicle coordinate system
+                longitudinal_dist = np.dot(relative_pos, forward_vec)  # Forward distance
+                lateral_dist = abs(np.dot(relative_pos, lateral_vec))   # Lateral distance
+                
+                # Only consider obstacles in front of the vehicle
+                if longitudinal_dist <= 0:
+                    continue
+                    
+                # Calculate threat score based on both distances
+                threat_score = longitudinal_dist + 2.0 * lateral_dist
+                
+                # Filter based on threat criteria (more conservative for linear constraints)
+                if (longitudinal_dist > 35 or           # Longer prediction horizon
+                    lateral_dist > 4.5 or               # Slightly wider lateral tolerance
+                    threat_score > 45):                 # Higher threat threshold
                     continue
                 
+                threat_obstacles.append((threat_score, obs_id, obs_pos, longitudinal_dist, lateral_dist))
+            
+            # Sort by threat score and get most threatening obstacles
+            threat_obstacles.sort(key=lambda x: x[0])
+            closest_obstacles = threat_obstacles[:1]  # Consider top 1 threatening obstacle for linear constraints
+            
+            # Add linear constraints for threatening obstacles
+            for threat_score, obs_id, obs_pos, long_dist, lat_dist in closest_obstacles:
+                # Calculate avoidance direction based on predicted trajectory
+                diff = robot_pos - obs_pos
+                euclidean_dist = np.linalg.norm(diff)
+                
                 # Avoid numerical issues
-                if dist >= 0.001:
-                    # 基于预测轨迹计算避障方向向量
-                    diff = robot_predicted_pos - obs_pos
-                    a_fixed = diff / dist  # 基于预测位置的单位向量
-                    safe_distance = 4.0  # 远距离时使用较小的安全距离
+                if euclidean_dist >= 0.001:
+                    a_fixed = diff / euclidean_dist  # unit vector from obstacle to robot
                     
-                    # Convert to CasADi DM - 这些现在基于预测轨迹
+                    # Adaptive safe distance for linear constraints
+                    base_safe_distance = 5
+                    lateral_factor = max(0.6, (4.5 - lat_dist) / 4.5)
+                    safe_distance = base_safe_distance * lateral_factor
+                    
+                    # Convert to CasADi DM
                     a_ca = ca.DM(a_fixed)
                     obs_pos_ca = ca.DM(obs_pos)
                     
-                    # 添加线性约束：a_predicted · (x[t] - obs_pos) >= safe_distance
-                    # 基于预测轨迹的线性约束，能更好地预测避障方向
+                    # Add linearized constraint
                     constraint_expr = a_ca[0] * (self.z[0, t] - obs_pos_ca[0]) + a_ca[1] * (self.z[1, t] - obs_pos_ca[1])
                     self.opti.subject_to(constraint_expr >= safe_distance)
+                    
+                    # logger.info(f"添加线性避障约束 t={t}, obs_id={obs_id}, long_dist={long_dist:.2f}m, lat_dist={lat_dist:.2f}m")
 
     
     def setup_solver(self):
