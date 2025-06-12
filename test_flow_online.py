@@ -109,65 +109,67 @@ data_status = {
 
 # 障碍物处理类
 class ObstacleInfo:
-    def __init__(self, obs_id, x, y, width=2.0, length=5.0):
+    def __init__(self, obs_id, x, y, vx, vy, width=2.0, length=5.0):
         self.obs_id = obs_id
         self.x = x
         self.y = y
+        self.vx = vx  # 绝对速度x分量 (全局坐标系)
+        self.vy = vy  # 绝对速度y分量 (全局坐标系)
+        self.v = np.sqrt(vx**2 + vy**2)  # 绝对速度大小
         self.width = width
         self.length = length
-        self.positions = [[np.array([x, y])]]  # 静态障碍物的位置 [t][v_id]
+        self.positions = [[np.array([x, y])]]  # 障碍物的位置 [t][v_id]
+        
+        # 动静态判断参数
+        self.speed_threshold = 0.8  # 动静态判断阈值 (m/s)
+        self.is_dynamic = self.v > self.speed_threshold
+        
+        # 障碍物类型
+        if self.is_dynamic:
+            self.type = "dynamic"
+        else:
+            self.type = "static"
 
-# 处理障碍物信息
-def process_obstacles(sensorobjects_msg):
+def validate_obstacle_speed_conversion_v2(ego_speed, ego_heading_deg, rel_vx_body, rel_vy_body, abs_vx_global, abs_vy_global):
     """
-    处理障碍物信息并更新MPC控制器中的障碍物
-    注意：此函数不再直接使用，而是被cal_action中的代码取代，
-    保留此函数仅作为参考。cal_action中的代码对坐标变换进行了更详细的处理。
+    验证障碍物速度转换是否正确（修正版）
     
-    参数:
-        sensorobjects_msg: 传感器检测到的障碍物消息
+    Args:
+        ego_speed: 主车速度 (m/s)
+        ego_heading_deg: 主车航向角 (度)
+        rel_vx_body, rel_vy_body: 车身坐标系下的相对速度分量
+        abs_vx_global, abs_vy_global: 全局坐标系下的绝对速度分量
     """
-    obstacles = {}
+    ego_heading_rad = np.radians(ego_heading_deg)
     
-    if sensorobjects_msg and hasattr(sensorobjects_msg, 'obs') and len(sensorobjects_msg.obs) > 0:
-        # 清空之前的障碍物
-        P.obstacles.clear()
-        
-        # 更新障碍物数量
-        P.num_obstacles = len(sensorobjects_msg.obs)
-        
-        # 处理每个障碍物
-        for i, obj in enumerate(sensorobjects_msg.obs):
-            # 提取障碍物ID和位置
-            obs_id = obj.id
-            
-            # 获取障碍物的全局位置（米为单位）
-            # 注意：需要将传感器数据中的厘米转换为米
-            x_global = obj.x / 100.0  # 厘米转米
-            y_global = obj.y / 100.0  # 厘米转米
-            
-            # 使用检测到的宽度和长度，或者使用默认值（单位转换为米）
-            width = obj.width / 100.0 if obj.width > 0.1 else 2.0  # 默认宽度2.0m
-            length = obj.length / 100.0 if obj.length > 0.1 else 5.0  # 默认长度5.0m
-            
-            # 将障碍物位置转换到车辆坐标系
-            # 此处假设车辆位于原点(0,0)，并且朝向是车辆坐标系的正前方
-            # 实际应用中需要根据车辆当前位置和朝向进行坐标变换
-            
-            # 创建障碍物信息对象，使用局部坐标
-            obstacle = ObstacleInfo(obs_id, x_global, y_global, width, length)
-            
-            # 将障碍物添加到P.obstacles中
-            P.obstacles[obs_id] = obstacle
-            
-        rospy.loginfo(f"更新了 {P.num_obstacles} 个障碍物")
-    else:
-        # 清空障碍物
-        P.obstacles.clear()
-        P.num_obstacles = 0
-        rospy.loginfo("没有检测到障碍物或障碍物消息为空")
+    # 主车在车身坐标系下的速度
+    ego_vx_body = 0.0
+    ego_vy_body = ego_speed
     
-    return obstacles
+    # 障碍物在车身坐标系下的绝对速度
+    expected_abs_vx_body = rel_vx_body + ego_vx_body
+    expected_abs_vy_body = rel_vy_body + ego_vy_body
+    
+    # 转换到全局坐标系
+    expected_abs_vx_global = expected_abs_vx_body * np.cos(ego_heading_rad + np.pi/2) - expected_abs_vy_body * np.sin(ego_heading_rad + np.pi/2)
+    expected_abs_vy_global = expected_abs_vx_body * np.sin(ego_heading_rad + np.pi/2) + expected_abs_vy_body * np.cos(ego_heading_rad + np.pi/2)
+    
+    vx_error = abs(abs_vx_global - expected_abs_vx_global)
+    vy_error = abs(abs_vy_global - expected_abs_vy_global)
+    
+    if vx_error > 0.01 or vy_error > 0.01:
+        rospy.logwarn(f"速度转换可能有误: vx_error={vx_error:.3f}, vy_error={vy_error:.3f}")
+        rospy.logwarn(f"主车: speed={ego_speed:.2f}, heading={ego_heading_deg:.1f}°")
+        rospy.logwarn(f"车身系相对速度: ({rel_vx_body:.2f}, {rel_vy_body:.2f})")
+        rospy.logwarn(f"全局系转换后: ({abs_vx_global:.2f}, {abs_vy_global:.2f})")
+        rospy.logwarn(f"全局系期望值: ({expected_abs_vx_global:.2f}, {expected_abs_vy_global:.2f})")
+
+# 保留旧的验证函数以备兼容
+def validate_obstacle_speed_conversion(ego_speed, ego_heading_deg, rel_vx, rel_vy, abs_vx, abs_vy):
+    """
+    验证障碍物速度转换是否正确（旧版本，已废弃）
+    """
+    rospy.logwarn("使用了已废弃的验证函数，请使用validate_obstacle_speed_conversion_v2")
 
 def update_frame_data(topic, msg):
     if topic == "/sensorgps":
@@ -196,6 +198,21 @@ def cal_action(sensor_data, reference_data):
     ego_plan.points = roadpoint()
     use_mpc = True
     
+    # 获取主车当前状态信息
+    ego_speed = 0.0  # 主车速度
+    ego_heading = 0.0  # 主车航向角（弧度）
+    
+    # 从sensor_data获取主车状态
+    if sensor_data and '0' in sensor_data:
+        ego_speed = sensor_data['0'].get("v", 0.0)  # 主车速度 (m/s)
+        ego_heading_deg = sensor_data['0'].get("heading", 0.0)  # 主车航向角（度）
+        ego_heading = np.radians(ego_heading_deg)  # 转换为弧度
+    
+    # 主车在车身坐标系下的速度分量
+    # 车身坐标系：x方向为横向（垂直车身），y方向为纵向（沿车身前进方向）
+    ego_vx_body = 0.0  # 主车横向速度为0（不侧滑）
+    ego_vy_body = ego_speed  # 主车纵向速度等于车速
+    
     # 处理障碍物信息
     if "objectTrack" in frame_data and frame_data["objectTrack"] is not None:
         sensorobjects_msg = frame_data["objectTrack"]
@@ -205,7 +222,7 @@ def cal_action(sensor_data, reference_data):
             P.init(num_obstacles=len(sensorobjects_msg.obs),
                   obstacle_horizon=20,
                   num_modes=1,
-                  treat_obstacles_as_static=True)
+                  treat_obstacles_as_static=False)
             
             # 清空之前的障碍物
             P.obstacles.clear()
@@ -223,23 +240,39 @@ def cal_action(sensor_data, reference_data):
                     obs_x_global = obj.x 
                     obs_y_global = obj.y 
                     
-                    # # 障碍物相对于车辆的位置（全局坐标系）
-                    # dx = obs_x_global - ego_x
-                    # dy = obs_y_global - ego_y
-                    
-                    # # 将障碍物位置从全局坐标系转换到车辆局部坐标系
-                    # # 1. 平移（使车辆位置为原点）
-                    # # 2. 旋转（使车辆朝向为x轴正方向）
-                    # obs_x_local = dx * np.cos(-ego_heading) - dy * np.sin(-ego_heading)
-                    # obs_y_local = dx * np.sin(-ego_heading) + dy * np.cos(-ego_heading)
-                    
                     # 使用检测到的宽度和长度，或者使用默认值（单位转换为米）
                     width = obj.width 
                     length = obj.length
-                    # rospy.loginfo(f"障碍物 {obs_id} 局部坐标: x={obs_x_local:.2f}, y={obs_y_local:.2f}, w={width:.2f}, l={length:.2f}")
                     
-                    # 创建障碍物信息对象，使用局部坐标
-                    obstacle = ObstacleInfo(obs_id, obs_x_global, obs_y_global, width, length)
+                    # 获取障碍物相对速度信息（车身坐标系）
+                    rel_vx_body = getattr(obj, 'relspeedx', 0.0)  # 相对速度x分量（横向）
+                    rel_vy_body = getattr(obj, 'relspeedy', 0.0)  # 相对速度y分量（纵向）
+                    
+                    # 将相对速度转换为车身坐标系下的绝对速度
+                    # 绝对速度 = 相对速度 + 主车速度（均在车身坐标系下）
+                    abs_vx_body = rel_vx_body + ego_vx_body  # 横向绝对速度
+                    abs_vy_body = rel_vy_body + ego_vy_body  # 纵向绝对速度
+                    
+                    # 将车身坐标系下的绝对速度转换为全局坐标系
+                    # 全局坐标系转换：考虑主车航向角
+                    abs_vx_global = abs_vx_body * np.cos(ego_heading + np.pi/2) - abs_vy_body * np.sin(ego_heading + np.pi/2)
+                    abs_vy_global = abs_vx_body * np.sin(ego_heading + np.pi/2) + abs_vy_body * np.cos(ego_heading + np.pi/2)
+                    
+                    # 验证速度转换是否正确
+                    validate_obstacle_speed_conversion_v2(ego_speed, ego_heading_deg, rel_vx_body, rel_vy_body, abs_vx_global, abs_vy_global)
+                    
+                    # 创建障碍物信息对象，传递全局坐标系下的绝对速度信息
+                    obstacle = ObstacleInfo(obs_id, obs_x_global, obs_y_global, abs_vx_global, abs_vy_global, width, length)
+                    
+                    # 判断障碍物类型并输出调试信息
+                    v_magnitude = obstacle.v
+                    obstacle_type = obstacle.type
+                    
+                    rospy.loginfo(f"障碍物 {obs_id}: {obstacle_type}, 位置=({obs_x_global:.1f},{obs_y_global:.1f})")
+                    rospy.loginfo(f"  车身系相对速度=({rel_vx_body:.2f},{rel_vy_body:.2f})")
+                    rospy.loginfo(f"  车身系绝对速度=({abs_vx_body:.2f},{abs_vy_body:.2f})")
+                    rospy.loginfo(f"  全局系绝对速度=({abs_vx_global:.2f},{abs_vy_global:.2f}), |v|={v_magnitude:.2f}")
+                    rospy.loginfo(f"  主车速度={ego_speed:.2f}m/s, 航向={ego_heading_deg:.1f}°, 动态判断={obstacle.is_dynamic}")
                     
                     # 将障碍物添加到P.obstacles中
                     P.obstacles[obs_id] = obstacle
@@ -331,8 +364,9 @@ def offline_test():
     global bag_data, frame_data, data_status
     
     # 打开bag文件
-    # file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
-    file_path = '/home/admin/Downloads/2025-06-06-09-18-01.bag' 
+    # file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'2025-06-11-17-19-41.bag
+    # file_path = '/home/admin/Downloads/2025-06-11-17-23-05.bag' 
+    file_path = '/home/admin/Downloads/2025-06-11-17-19-41.bag' 
     bag = rosbag.Bag(file_path, 'r')
     
     # 按时间戳组织数据
@@ -344,7 +378,7 @@ def offline_test():
     
     print("Reading bag file...")
     frame_count = 0
-    max_frames = 610  # 只保存前600帧数据
+    max_frames = 500  # 只保存前600帧数据
     
     for topic, msg, t in bag.read_messages(topics=topics):
         timestamp = t.to_sec()
@@ -390,7 +424,7 @@ def offline_test():
 
         print(data_status.values())       
         # 检查数据是否完整并进行规划
-        if i < 400 or i > 610:
+        if i < 100 or i > 610:
             continue
         
         if all(data_status.values()):

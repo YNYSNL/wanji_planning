@@ -39,7 +39,7 @@ class P:
     dist_stop = 1  # stop permitted when dist to goal < dist_stop
     speed_stop = 0.5 / 3.6  # stop permitted when speed < speed_stop
     time_max = 500.0  # max simulation time
-    iter_max = 2  # max iteration
+    iter_max = 5  # max iteration
     target_speed = 40.0 / 3.6  # target speed
     N_IND = 50  # search index number
     dt = 0.3  # time step
@@ -65,7 +65,7 @@ class P:
     obstacles = dict()  # obstacles: {id: [x, y, w, l]}
     obstacle_horizon = 15  # horizon length for obstacle avoidance
     num_modes = 1  # number of modes for Reeds-Shepp path
-    treat_obstacles_as_static = True  # treat obstacles as static
+    treat_obstacles_as_static = False  # treat obstacles as dynamic
     use_linear_obstacle_constraints = True  # use linear constraints for obstacles (faster computation)
 
     @classmethod
@@ -290,32 +290,35 @@ def linear_mpc_control(z_ref, z0, a_old, delta_old, consider_obstacles=True, use
 
     x, y, yaw, v = None, None, None, None
 
-    for k in range(P.iter_max):
+    # for k in range(P.iter_max):
         
-        # Predict states in T steps
-        z_bar = predict_states_in_T_step(z0, a_old, delta_old, z_ref)
-        a_rec, delta_rec = a_old[:], delta_old[:]
+    #     # Predict states in T steps
+    #     z_bar = predict_states_in_T_step(z0, a_old, delta_old, z_ref)
+    #     a_rec, delta_rec = a_old[:], delta_old[:]
         
-        # Create and solve MPC problem
-        mpc_problem = MPCProblem(z_ref, z_bar, z0, delta_old, consider_obstacles)
+    #     # Create and solve MPC problem
+    #     mpc_problem = MPCProblem(z_ref, z_bar, z0, delta_old, consider_obstacles)
 
   
-        a_old, delta_old, x, y, yaw, v = mpc_problem.solve()
+    #     a_old, delta_old, x, y, yaw, v = mpc_problem.solve()
 
         
-        if a_old is None:
-            # If optimization fails, use previous control inputs
-            logger.warning("Optimization failed, using previous control inputs")
-            return None, None, None, None, None, None
+    #     if a_old is None:
+    #         # If optimization fails, use previous control inputs
+    #         logger.warning("Optimization failed, using previous control inputs")
+    #         return None, None, None, None, None, None
         
-        # Calculate maximum control change
-        du_a_max = max([abs(ia - iao) for ia, iao in zip(a_old, a_rec)])
-        du_d_max = max([abs(ide - ido) for ide, ido in zip(delta_old, delta_rec)])
+    #     # Calculate maximum control change
+    #     du_a_max = max([abs(ia - iao) for ia, iao in zip(a_old, a_rec)])
+    #     du_d_max = max([abs(ide - ido) for ide, ido in zip(delta_old, delta_rec)])
         
-        # If control change is less than threshold, stop iteration
-        if max(du_a_max, du_d_max) < P.du_res:
-            logger.info(f"MPC iteration converged, iterations: {k+1}")
-            break
+    #     # If control change is less than threshold, stop iteration
+    #     if max(du_a_max, du_d_max) < P.du_res:
+    #         logger.info(f"MPC iteration converged, iterations: {k+1}")
+    #         break
+    z_bar = predict_states_in_T_step(z0, a_old, delta_old, z_ref)
+    mpc_problem = MPCProblem(z_ref, z_bar, z0, a_old, delta_old, consider_obstacles)
+    a_old, delta_old, x, y, yaw, v = mpc_problem.solve()
     # 恢复全局配置
     P.use_linear_obstacle_constraints = original_setting
     
@@ -425,19 +428,21 @@ class MPCProblem:
     Linear MPC problem construction and solution
     Encapsulates the MPC problem to make the building and solving process clearer
     """
-    def __init__(self, z_ref, z_bar, z0, d_bar, consider_obstacles=True):
+    def __init__(self, z_ref, z_bar, z0, a_old, delta_old, consider_obstacles=True):
         """
         Initialize MPC problem
         :param z_ref: reference trajectory [x, y, v, yaw]
         :param z_bar: predicted states
         :param z0: initial state
-        :param d_bar: steering angle from previous time step
+        :param a_old: acceleration from previous time step
+        :param delta_old: steering angle from previous time step
         :param consider_obstacles: whether to consider obstacles
         """
         self.z_ref = z_ref
         self.z_bar = z_bar
         self.z0 = z0
-        self.d_bar = d_bar
+        self.a_old = a_old
+        self.delta_old = delta_old
         self.consider_obstacles = consider_obstacles
         
         # Create CasADi optimizer
@@ -447,8 +452,30 @@ class MPCProblem:
         self.z = self.opti.variable(P.NX, P.T + 1)  # state variables
         self.u = self.opti.variable(P.NU, P.T)      # control variables
         
+        # Set warm start initial values for control variables
+        self.set_warm_start_values()
+        
         # Construct problem
         self.construct_problem()
+    
+    def set_warm_start_values(self):
+        """Set warm start initial values for optimization variables"""
+        # Set initial guess for control variables using previous solution
+        for t in range(P.T):
+            if t < len(self.a_old):
+                self.opti.set_initial(self.u[0, t], self.a_old[t])  # acceleration
+            else:
+                self.opti.set_initial(self.u[0, t], 0.0)  # default acceleration
+                
+            if t < len(self.delta_old):
+                self.opti.set_initial(self.u[1, t], self.delta_old[t])  # steering
+            else:
+                self.opti.set_initial(self.u[1, t], 0.0)  # default steering
+        
+        # Set initial guess for state variables using predicted trajectory
+        for t in range(P.T + 1):
+            for i in range(P.NX):
+                self.opti.set_initial(self.z[i, t], self.z_bar[i, t])
     
     def construct_problem(self):
         """Construct MPC problem"""
@@ -509,7 +536,7 @@ class MPCProblem:
         
         # Batch computation of linear discrete models
         for t in range(P.T):
-            A, B, C = calc_linear_discrete_model(self.z_bar[2, t], self.z_bar[3, t], self.d_bar[t])
+            A, B, C = calc_linear_discrete_model(self.z_bar[2, t], self.z_bar[3, t], self.delta_old[t])
             A_matrices.append(ca.DM(A))
             B_matrices.append(ca.DM(B))
             C_vectors.append(ca.DM(C))
@@ -546,7 +573,7 @@ class MPCProblem:
             self.opti.subject_to(du_steer <= max_steer_change)
     
     def add_obstacle_constraints(self):
-        """Add obstacle constraints with improved forward vehicle avoidance"""
+        """Add adaptive obstacle constraints: follow dynamic obstacles, avoid static obstacles"""
         treat_as_static = P.treat_obstacles_as_static
         for t in range(min(P.T, P.obstacle_horizon)):
             robot_pos = self.z_bar[:2, t]
@@ -555,10 +582,31 @@ class MPCProblem:
             # Calculate threat score for all obstacles
             threat_obstacles = []
             for obs_id, obstacle in P.obstacles.items():
-                if treat_as_static:
-                    obs_pos = obstacle.positions[0][0]
+                # Get obstacle initial position and velocity
+                obs_pos_t0 = obstacle.positions[0][0]
+                
+                # Determine if obstacle is dynamic or static
+                # Use the obstacle's built-in dynamic/static classification
+                is_dynamic = getattr(obstacle, 'is_dynamic', False)
+                v_magnitude = getattr(obstacle, 'v', 0.0)
+                
+                # Calculate predicted obstacle position at time t
+                if treat_as_static or not is_dynamic:
+                    # Static obstacle: position doesn't change
+                    obs_pos = obs_pos_t0
                 else:
-                    obs_pos = obstacle.positions[0][t]
+                    # Dynamic obstacle: predict position using constant velocity model
+                    if hasattr(obstacle, 'vx') and hasattr(obstacle, 'vy'):
+                        # Use actual velocity components if available
+                        vx = obstacle.vx
+                        vy = obstacle.vy
+                    else:
+                        # Fallback: assume stationary obstacle
+                        vx, vy = 0.0, 0.0
+                    
+                    # Predict position at time t using constant velocity model
+                    dt = P.dt * t  # Time from current moment
+                    obs_pos = obs_pos_t0 + np.array([vx * dt, vy * dt])
                 
                 # Calculate relative position vector
                 relative_pos = obs_pos - robot_pos
@@ -575,74 +623,111 @@ class MPCProblem:
                 if longitudinal_dist <= 0:
                     continue
                 
-                # Classify obstacle type based on lateral distance
-                if lateral_dist <= 2.5:  # Same lane (车道宽度约3.5米，考虑车宽2米)
-                    # Same lane vehicle - high priority, use distance-based threat
-                    if longitudinal_dist > 50:  # Too far ahead to matter
-                        continue
-                    # For same-lane vehicles, closer = higher threat (inverse relationship)
-                    threat_score = 100.0 - longitudinal_dist  # Higher score for closer vehicles
-                    vehicle_type = "same_lane"
+                # Classify obstacle type based on lateral distance and motion state
+                if lateral_dist <= 2.5:  # Same lane
+                    if is_dynamic:
+                        # Dynamic obstacle in same lane - use car following logic
+                        if longitudinal_dist > 50:  # Too far ahead to matter
+                            continue
+                        threat_score = 100.0 - longitudinal_dist  # Higher priority for closer vehicles
+                        vehicle_type = "same_lane_dynamic"
+                    else:
+                        # Static obstacle in same lane - use avoidance logic
+                        if longitudinal_dist > 30:  # Shorter range for static obstacles
+                            continue
+                        threat_score = 50.0 - longitudinal_dist  # High priority for avoidance
+                        vehicle_type = "same_lane_static"
                 elif lateral_dist <= 4.5:  # Adjacent lane
-                    # Adjacent lane vehicle - medium priority  
                     if longitudinal_dist > 35:
                         continue
-                    threat_score = 50.0 + longitudinal_dist + lateral_dist  # Lower priority
+                    threat_score = 150.0 + longitudinal_dist + lateral_dist  # Lower priority
                     vehicle_type = "adjacent_lane"
                 else:  # Far lateral distance
-                    # Distant lane or roadside - low priority
                     if longitudinal_dist > 25:
                         continue  
                     threat_score = 200.0 + longitudinal_dist + lateral_dist  # Lowest priority
                     vehicle_type = "distant"
                 
-                threat_obstacles.append((threat_score, obs_id, obs_pos, longitudinal_dist, lateral_dist, vehicle_type))
+                threat_obstacles.append((threat_score, obs_id, obs_pos, longitudinal_dist, lateral_dist, vehicle_type, is_dynamic))
             
-            # Sort by threat score (lower score = higher threat for same lane vehicles)
+            # Sort by threat score (lower score = higher threat)
             threat_obstacles.sort(key=lambda x: x[0])
             
-            # Consider more obstacles to ensure proper avoidance
-            max_obstacles = min(4, len(threat_obstacles))  # Consider up to 4 obstacles
+            # Consider obstacles based on type
+            max_obstacles = min(4, len(threat_obstacles))
             closest_obstacles = threat_obstacles[:max_obstacles]
             
             # Add constraints for threatening obstacles
-            for threat_score, obs_id, obs_pos, long_dist, lat_dist, vehicle_type in closest_obstacles:
+            for threat_score, obs_id, obs_pos, long_dist, lat_dist, vehicle_type, is_dynamic in closest_obstacles:
                 # Calculate avoidance direction
                 diff = robot_pos - obs_pos
                 euclidean_dist = np.linalg.norm(diff)
                 
                 # Avoid numerical issues
                 if euclidean_dist >= 0.001:
-                    a = diff / euclidean_dist  # unit vector from obstacle to robot
-                    
-                    # Adaptive safe distance based on vehicle type and position
-                    if vehicle_type == "same_lane":
-                        # Same lane vehicles need larger safe distance
-                        base_safe_distance = 4.5  # Increased from 3.0
-                        # Closer vehicles need even larger safety margin
-                        distance_factor = max(1.0, (20.0 - long_dist) / 20.0)
+                    if vehicle_type == "same_lane_dynamic":
+                        # Car following constraint: maintain safe following distance
+                        # Use longitudinal constraint only (allow lateral freedom for lane changing)
+                        forward_vec_ca = ca.DM([np.cos(robot_yaw), np.sin(robot_yaw)])
+                        
+                        # Calculate longitudinal separation
+                        relative_pos_ca = ca.DM([self.z[0, t] - obs_pos[0], self.z[1, t] - obs_pos[1]])
+                        longitudinal_separation = forward_vec_ca.T @ relative_pos_ca
+                        
+                        # Safe following distance based on speed and time gap
+                        robot_speed = self.z_bar[2, t]  # Current robot speed
+                        time_gap = 1.5  # seconds
+                        min_distance = 3.0  # minimum distance in meters
+                        safe_following_distance = max(min_distance, robot_speed * time_gap)
+                        
+                        # Add following constraint (maintain distance behind obstacle)
+                        self.opti.subject_to(-longitudinal_separation >= safe_following_distance)
+                        
+                        # logger.info(f"跟驰约束 t={t}, obs_id={obs_id}, long_dist={long_dist:.1f}m, safe_dist={safe_following_distance:.1f}m")
+                        
+                    elif vehicle_type == "same_lane_static":
+                        # Static obstacle avoidance: strong lateral avoidance constraint
+                        a = diff / euclidean_dist  # unit vector from obstacle to robot
+                        
+                        # Larger safe distance for static obstacles to encourage avoidance
+                        base_safe_distance = 6.0  # Increased for static obstacles
+                        distance_factor = max(1.2, (25.0 - long_dist) / 20.0)
                         safe_distance = base_safe_distance * distance_factor
-                    elif vehicle_type == "adjacent_lane":
-                        # Adjacent lane vehicles need moderate safe distance
-                        base_safe_distance = 3.0
-                        distance_factor = max(0.7, (15.0 - long_dist) / 15.0)
-                        safe_distance = base_safe_distance * distance_factor
-                    else:  # distant
-                        # Distant vehicles need minimal safe distance
-                        safe_distance = 2.0
-                    
-                    # Convert to CasADi DM
-                    a_ca = ca.DM(a)
-                    obs_pos_ca = ca.DM(obs_pos)
-                    
-                    # Add obstacle avoidance constraint
-                    constraint_expr = a_ca[0] * (self.z[0, t] - obs_pos_ca[0]) + a_ca[1] * (self.z[1, t] - obs_pos_ca[1])
-                    self.opti.subject_to(constraint_expr >= safe_distance)
-                    
-                    # logger.info(f"避障约束 t={t}, obs_id={obs_id}, type={vehicle_type}, long={long_dist:.1f}m, lat={lat_dist:.1f}m, safe_dist={safe_distance:.1f}m")
+                        
+                        # Convert to CasADi DM
+                        a_ca = ca.DM(a)
+                        obs_pos_ca = ca.DM(obs_pos)
+                        
+                        # Add strong avoidance constraint
+                        constraint_expr = a_ca[0] * (self.z[0, t] - obs_pos_ca[0]) + a_ca[1] * (self.z[1, t] - obs_pos_ca[1])
+                        self.opti.subject_to(constraint_expr >= safe_distance)
+                        
+                        # logger.info(f"静态避障约束 t={t}, obs_id={obs_id}, long_dist={long_dist:.1f}m, safe_dist={safe_distance:.1f}m")
+                        
+                    else:
+                        # Other obstacles: standard avoidance
+                        a = diff / euclidean_dist  # unit vector from obstacle to robot
+                        
+                        # Standard safe distance
+                        if vehicle_type == "adjacent_lane":
+                            base_safe_distance = 3.0
+                            distance_factor = max(0.7, (15.0 - long_dist) / 15.0)
+                            safe_distance = base_safe_distance * distance_factor
+                        else:  # distant
+                            safe_distance = 2.0
+                        
+                        # Convert to CasADi DM
+                        a_ca = ca.DM(a)
+                        obs_pos_ca = ca.DM(obs_pos)
+                        
+                        # Add avoidance constraint
+                        constraint_expr = a_ca[0] * (self.z[0, t] - obs_pos_ca[0]) + a_ca[1] * (self.z[1, t] - obs_pos_ca[1])
+                        self.opti.subject_to(constraint_expr >= safe_distance)
+                        
+                        # logger.info(f"标准避障约束 t={t}, obs_id={obs_id}, type={vehicle_type}, long_dist={long_dist:.1f}m, safe_dist={safe_distance:.1f}m")
     
     def add_linear_obstacle_constraints(self):
-        """Add linearized obstacle constraints with forward direction projection"""
+        """Add linearized adaptive obstacle constraints: follow dynamic obstacles, avoid static obstacles"""
         treat_as_static = P.treat_obstacles_as_static
         
         for t in range(min(P.T, P.obstacle_horizon)):
@@ -652,10 +737,31 @@ class MPCProblem:
             # Calculate threat score for all obstacles using predicted trajectory
             threat_obstacles = []
             for obs_id, obstacle in P.obstacles.items():
-                if treat_as_static:
-                    obs_pos = obstacle.positions[0][0]
+                # Get obstacle initial position
+                obs_pos_t0 = obstacle.positions[0][0]
+                
+                # Determine if obstacle is dynamic or static
+                # Use the obstacle's built-in dynamic/static classification
+                is_dynamic = getattr(obstacle, 'is_dynamic', False)
+                v_magnitude = getattr(obstacle, 'v', 0.0)
+                
+                # Calculate predicted obstacle position at time t
+                if treat_as_static or not is_dynamic:
+                    # Static obstacle: position doesn't change
+                    obs_pos = obs_pos_t0
                 else:
-                    obs_pos = obstacle.positions[0][min(t, len(obstacle.positions[0])-1)]
+                    # Dynamic obstacle: predict position using constant velocity model
+                    if hasattr(obstacle, 'vx') and hasattr(obstacle, 'vy'):
+                        # Use actual velocity components if available
+                        vx = obstacle.vx
+                        vy = obstacle.vy
+                    else:
+                        # Fallback: assume stationary obstacle
+                        vx, vy = 0.0, 0.0
+                    
+                    # Predict position at time t
+                    dt = P.dt * t
+                    obs_pos = obs_pos_t0 + np.array([vx * dt, vy * dt])
                 
                 # Calculate relative position vector
                 relative_pos = obs_pos - robot_pos
@@ -672,45 +778,86 @@ class MPCProblem:
                 if longitudinal_dist <= 0:
                     continue
                     
-                # Calculate threat score based on both distances
-                threat_score = longitudinal_dist + 2.0 * lateral_dist
+                # Calculate threat score based on obstacle type and motion state
+                if lateral_dist <= 2.5:  # Same lane
+                    if is_dynamic:
+                        # Dynamic obstacle - lower priority for linear constraints (handled by car following)
+                        threat_score = 200.0 + longitudinal_dist
+                        vehicle_type = "same_lane_dynamic"
+                    else:
+                        # Static obstacle - high priority for avoidance
+                        threat_score = longitudinal_dist + lateral_dist
+                        vehicle_type = "same_lane_static"
+                else:
+                    # Other lanes
+                    threat_score = longitudinal_dist + 2.0 * lateral_dist
+                    vehicle_type = "other_lane"
                 
-                # Filter based on threat criteria (more conservative for linear constraints)
-                if (longitudinal_dist > 35 or           # Longer prediction horizon
-                    lateral_dist > 4.5 or               # Slightly wider lateral tolerance
-                    threat_score > 45):                 # Higher threat threshold
+                # Filter based on threat criteria
+                if (longitudinal_dist > 35 or           
+                    lateral_dist > 4.5 or               
+                    threat_score > 45):                 
                     continue
                 
-                threat_obstacles.append((threat_score, obs_id, obs_pos, longitudinal_dist, lateral_dist))
+                threat_obstacles.append((threat_score, obs_id, obs_pos, longitudinal_dist, lateral_dist, vehicle_type, is_dynamic))
             
             # Sort by threat score and get most threatening obstacles
             threat_obstacles.sort(key=lambda x: x[0])
-            closest_obstacles = threat_obstacles[:1]  # Consider top 1 threatening obstacle for linear constraints
+            # Prioritize static obstacles for linear constraints
+            static_obstacles = [obs for obs in threat_obstacles if not obs[6]]  # is_dynamic = False
+            dynamic_obstacles = [obs for obs in threat_obstacles if obs[6]]     # is_dynamic = True
+            
+            # Consider static obstacles first, then dynamic if no static obstacles
+            if static_obstacles:
+                closest_obstacles = static_obstacles[:1]  # Focus on closest static obstacle
+            elif dynamic_obstacles:
+                closest_obstacles = dynamic_obstacles[:1]  # Fallback to dynamic obstacle
+            else:
+                closest_obstacles = []
             
             # Add linear constraints for threatening obstacles
-            for threat_score, obs_id, obs_pos, long_dist, lat_dist in closest_obstacles:
+            for threat_score, obs_id, obs_pos, long_dist, lat_dist, vehicle_type, is_dynamic in closest_obstacles:
                 # Calculate avoidance direction based on predicted trajectory
                 diff = robot_pos - obs_pos
                 euclidean_dist = np.linalg.norm(diff)
                 
                 # Avoid numerical issues
                 if euclidean_dist >= 0.001:
-                    a_fixed = diff / euclidean_dist  # unit vector from obstacle to robot
-                    
-                    # Adaptive safe distance for linear constraints
-                    base_safe_distance = 5
-                    lateral_factor = max(0.6, (4.5 - lat_dist) / 4.5)
-                    safe_distance = base_safe_distance * lateral_factor
-                    
-                    # Convert to CasADi DM
-                    a_ca = ca.DM(a_fixed)
-                    obs_pos_ca = ca.DM(obs_pos)
-                    
-                    # Add linearized constraint
-                    constraint_expr = a_ca[0] * (self.z[0, t] - obs_pos_ca[0]) + a_ca[1] * (self.z[1, t] - obs_pos_ca[1])
-                    self.opti.subject_to(constraint_expr >= safe_distance)
-                    
-                    # logger.info(f"添加线性避障约束 t={t}, obs_id={obs_id}, long_dist={long_dist:.2f}m, lat_dist={lat_dist:.2f}m")
+                    if vehicle_type == "same_lane_dynamic":
+                        # For dynamic obstacles, use lighter constraint (mainly handled by nonlinear constraints)
+                        forward_vec_ca = ca.DM([np.cos(robot_yaw), np.sin(robot_yaw)])
+                        relative_pos_ca = ca.DM([self.z[0, t] - obs_pos[0], self.z[1, t] - obs_pos[1]])
+                        longitudinal_separation = forward_vec_ca.T @ relative_pos_ca
+                        
+                        # Lighter following constraint for linear approximation
+                        safe_following_distance = 2.0  # Reduced for linear constraints
+                        self.opti.subject_to(-longitudinal_separation >= safe_following_distance)
+                        
+                        # logger.info(f"线性跟驰约束 t={t}, obs_id={obs_id}, long_dist={long_dist:.2f}m")
+                        
+                    else:
+                        # For static obstacles, use strong avoidance constraint
+                        a_fixed = diff / euclidean_dist  # unit vector from obstacle to robot
+                        
+                        # Adaptive safe distance for linear constraints
+                        if vehicle_type == "same_lane_static":
+                            base_safe_distance = 6.0  # Larger for static obstacles
+                            lateral_factor = max(0.8, (4.5 - lat_dist) / 4.5)
+                        else:
+                            base_safe_distance = 4.0
+                            lateral_factor = max(0.6, (4.5 - lat_dist) / 4.5)
+                        
+                        safe_distance = base_safe_distance * lateral_factor
+                        
+                        # Convert to CasADi DM
+                        a_ca = ca.DM(a_fixed)
+                        obs_pos_ca = ca.DM(obs_pos)
+                        
+                        # Add linearized constraint
+                        constraint_expr = a_ca[0] * (self.z[0, t] - obs_pos_ca[0]) + a_ca[1] * (self.z[1, t] - obs_pos_ca[1])
+                        self.opti.subject_to(constraint_expr >= safe_distance)
+                        
+                        # logger.info(f"线性避障约束 t={t}, obs_id={obs_id}, type={vehicle_type}, long_dist={long_dist:.2f}m, safe_dist={safe_distance:.1f}m")
 
     
     def setup_solver(self):
@@ -1201,6 +1348,7 @@ class MPCController:
                     obs_pos = obstacle.positions[0][0]
                     plt.scatter(obs_pos[0], obs_pos[1], color='red', s=100, marker='x', 
                                label=f'Obstacle {obs_id}' if obs_id == list(P.obstacles.keys())[0] else "")
+                    print(f"障碍物 {obs_id} 位置: {obs_pos}")
                     
                     # 绘制障碍物范围（可选）
                     if hasattr(obstacle, 'width') and hasattr(obstacle, 'length'):
