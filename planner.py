@@ -100,6 +100,42 @@ ref_s = []
 vehicle_init_pos = None  # 存储车辆初始位置的全局变量
 mpc_controller = None
 
+# 全局变量存储优秀驾驶人参考轨迹
+expert_ref_lons = []
+expert_ref_lats = []
+expert_trajectory_loaded = False
+
+def load_expert_trajectory(csv_path="reference_trajectory.csv"):
+    """
+    从CSV文件加载优秀驾驶人参考轨迹
+    
+    Args:
+        csv_path: CSV文件路径
+    
+    Returns:
+        success: 是否成功加载
+    """
+    global expert_ref_lons, expert_ref_lats, expert_trajectory_loaded
+    
+    try:
+        expert_ref_lons = []
+        expert_ref_lats = []
+        
+        with open(csv_path, 'r', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                expert_ref_lons.append(float(row['lon']))
+                expert_ref_lats.append(float(row['lat']))
+        
+        expert_trajectory_loaded = True
+        rospy.loginfo(f"成功从CSV文件加载了 {len(expert_ref_lons)} 个优秀驾驶人参考点")
+        return True
+        
+    except Exception as e:
+        rospy.logerr(f"加载优秀驾驶人轨迹CSV文件时出错: {e}")
+        expert_trajectory_loaded = False
+        return False
+
 def init_reference_path(reference_data):
     """初始化参考线信息并计算累计距离s值"""
     global ref_lons, ref_lats, ref_s, vehicle_init_pos
@@ -196,12 +232,13 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
     
     Args:
         state_data: 车辆当前状态数据
-        reference_data: 参考线数据
+        reference_data: 参考线数据（车道中心线，用于计算累计行驶距离）
         ego_plan: 规划结果
         ego_decision: 决策结果
         use_mpc: 是否使用MPC生成轨迹，默认为False
     """
     global ref_lons, ref_lats, ref_s, vehicle_init_pos, mpc_controller, mpc_time_records, step_counter
+    global expert_ref_lons, expert_ref_lats, expert_trajectory_loaded
     
     # 步数计数器
     step_counter += 1
@@ -209,9 +246,13 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
     # 深拷贝输入数据，避免修改原始数据
     DataFromEgo = copy.deepcopy(state_data)
     
-    # 如果参考线数据为空且有新的参考线数据，则初始化参考线
+    # 如果参考线数据为空且有新的参考线数据，则初始化参考线（用于计算累计行驶距离）
     if not ref_lons and reference_data:
         init_reference_path(reference_data)
+    
+    # 如果优秀驾驶人轨迹未加载，则加载（用于MPC规划）
+    if not expert_trajectory_loaded:
+        load_expert_trajectory()
     
     # 创建车辆状态对象
     ego_state = Node(
@@ -233,10 +274,10 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         rospy.loginfo(f"Vehicle initial position set to: {vehicle_init_pos}") 
    
     # 根据选择的方法生成局部坐标系下的轨迹
-    if use_mpc and ref_lons and ref_lats and ref_s:
-        # 将参考线转换为局部坐标系
+    if use_mpc and expert_trajectory_loaded and expert_ref_lons and expert_ref_lats:
+        # 将优秀驾驶人参考线转换为局部坐标系
         start_time1 = time.time()
-        local_ref_path = convert_reference_to_local(ego_state, ref_lons, ref_lats)
+        local_ref_path = convert_reference_to_local(ego_state, expert_ref_lons, expert_ref_lats)
         # plt.plot(local_ref_path.cx, local_ref_path.cy, marker='o', label='Trajectory Points')
         
         # plt.show()
