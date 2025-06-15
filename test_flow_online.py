@@ -7,6 +7,7 @@
 - 实现数据快照机制，确保规划算法使用的是同一时刻的一致性数据
 - 添加数据新鲜度验证，避免使用过时数据进行规划
 - 优化了数据处理流程，提高系统稳定性和安全性
+- 添加系统预热机制，解决JIT编译器冷启动问题
 """
 import sys
 sys.path.append('/home/wanji/HIL/devel/lib/python3/dist-packages')
@@ -25,7 +26,6 @@ import copy
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-import cvxpy
 from MotionPlanning.Control.MPC_XY_Frame import P, Node
 from transform import lon_lat_to_xy, xy_to_lon_lat
 import logging
@@ -40,14 +40,12 @@ logging.basicConfig(filename='test_flow_online.log', level=logging.INFO, format=
 # 添加数据锁保护
 data_lock = threading.Lock()
 
-global pub_ego_plan
-global pub_ego_decision
-global reference_line_received
-reference_line_received = False
+# 全局变量声明
+pub_ego_plan = None
+pub_ego_decision = None
 
-global bag_time
 bag_time = 0
-global bag_data
+bag_data = {}
 # file_path = '/media/wanji/ssd2T/20250211-bag/2025-02-11-15-31-30.bag'
 # file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'
 # 打开bag文件
@@ -351,6 +349,7 @@ def validate_data_freshness(frame_data_snapshot):
 # 检查数据是否齐全，且仅在数据齐全时处理
 def check_and_process_data():
     # 创建数据快照，避免在处理过程中被修改
+    global pub_ego_plan, pub_ego_decision
     frame_data_snapshot = None
     
     with data_lock:
@@ -418,7 +417,7 @@ def callback_hdroutetoglobal(data):
 
 def offline_test():
     """离线测试模式"""
-    global bag_data, frame_data, data_status
+    global bag_data, frame_data, data_status, pub_ego_plan, pub_ego_decision
     
     # 打开bag文件
     # file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'2025-06-11-17-19-41.bag
@@ -459,7 +458,7 @@ def offline_test():
     # 按时间戳顺序处理每一帧
     sorted_timestamps = sorted(frame_timestamps.keys())
     
-    # 创建结果发布器
+    # 创建结果发布器（使用全局变量）
     pub_ego_plan = rospy.Publisher("/planningmotion", planningmotion, queue_size=5)
     pub_ego_decision = rospy.Publisher("/behaviordecision", decisionbehavior, queue_size=5)
     
@@ -483,6 +482,8 @@ def offline_test():
         # 检查数据是否完整并进行规划
         if i < 100 or i > 610:
             continue
+
+        start_time = time.time()
         
         if all(data_status.values()):
             print("Processing planning for frame...")
@@ -505,19 +506,70 @@ def offline_test():
         else:
             print("Incomplete data for this frame, skipping...")
 
+        end_time = time.time()
+        execution_time = end_time - start_time
+        rospy.loginfo(f"Planning and decision execution time: {execution_time:.2f}s")
+
+# 系统预热函数
+def warm_up_planning_system():
+    """
+    系统预热：预先触发所有耗时的初始化过程
+    
+    这个函数会预先触发以下耗时操作的JIT编译和初始化：
+    1. NumPy/SciPy BLAS/LAPACK初始化
+    2. Numba JIT编译 (planner.calc_distance_batch)
+    """
+    print("启动规划系统预热...")
+    warm_start_time = time.time()
+    
+    try:
+        # 1. 预热NumPy/SciPy - 触发BLAS/LAPACK库初始化
+        print("预热NumPy/SciPy BLAS/LAPACK...")
+        dummy_large = np.random.rand(1000, 1000)
+        _ = np.linalg.inv(dummy_large @ dummy_large.T + np.eye(1000) * 0.1)
+        _ = np.fft.fft(np.random.rand(4096))  # 预热FFT
+        
+        # 2. 预热Numba JIT编译器 - 这是最耗时的部分 (60-80%)
+        print("预热Numba JIT编译器...")
+        try:
+            from planner import calc_distance_batch
+            # 多次调用确保JIT完全编译
+            dummy_coords = np.array([116.0, 116.1, 116.2])
+            dummy_lats = np.array([40.0, 40.1, 40.2])
+            for _ in range(3):  # 多次调用确保编译完成
+                _ = calc_distance_batch(dummy_coords, dummy_lats, dummy_coords, dummy_lats)
+            print("Numba JIT编译完成")
+        except Exception as e:
+            print(f"Numba预热失败: {e}")
+        
+        warm_end_time = time.time()
+        warm_duration = warm_end_time - warm_start_time
+        print(f"系统预热完成！总耗时: {warm_duration:.2f}s")
+
+        
+    except Exception as e:
+        print(f"预热过程中遇到错误: {e}")
+        print("系统仍可正常运行，但首次规划可能较慢")
+
 def main():
+    global pub_ego_plan, pub_ego_decision  # 在函数开头统一声明所有需要的全局变量
+    
     # 选择运行模式
     if len(sys.argv) > 1 and sys.argv[1] == '--offline': # sys.argv[0] == filename.py sys.argv[1] == '--offline'
         print("Running in offline mode...")
         rospy.init_node("ros_topic_processor_offline", anonymous=True)
+        
+        # 离线模式也执行预热
+        warm_up_planning_system()
+        
         offline_test()
     else:
         print("Running in online mode...")
         # 初始化ROS节点
         rospy.init_node("ros_topic_processor", anonymous=True)
         
-        global pub_ego_plan
-        global pub_ego_decision
+        # 🔥 系统预热（在订阅话题之前进行）
+        warm_up_planning_system()
         
         pub_ego_plan = rospy.Publisher("/planningmotion", planningmotion, queue_size=3)
         pub_ego_decision = rospy.Publisher("/behaviordecision", decisionbehavior, queue_size=3)

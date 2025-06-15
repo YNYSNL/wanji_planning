@@ -6,7 +6,6 @@ author: huiming zhou
 import os
 import sys
 import math
-import cvxpy
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -28,7 +27,7 @@ class P:
     # System config
     NX = 4  # state vector: z = [x, y, v, phi]
     NU = 2  # input vector: u = [acceleration, steer]
-    T = 20  # finite time horizon length that is the same as PLAN_HORIZON
+    T = 30  # finite time horizon length that is the same as PLAN_HORIZON
 
     # MPC config
     Q = np.diag([1.0, 1.0, 1.0, 1.0])  # penalty for states
@@ -42,7 +41,7 @@ class P:
     iter_max = 5  # max iteration
     target_speed = 40.0 / 3.6  # target speed
     N_IND = 50  # search index number
-    dt = 0.3  # time step
+    dt = 0.25  # time step
     d_dist = 1.0  # dist step
     du_res = 0.2  # threshold for stopping iteration
 
@@ -59,7 +58,7 @@ class P:
     steer_change_max = np.deg2rad(30.0)  # maximum steering speed [rad/s]
     speed_max = 55.0 / 3.6  # maximum speed [m/s]
     speed_min = 0.0 / 3.6  # minimum speed [m/s]
-    acceleration_max = 2.0  # maximum acceleration [m/s2]
+    acceleration_max = 3.2  # maximum acceleration [m/s2]
 
     num_obstacles = 1  # number of obstacles
     obstacles = dict()  # obstacles: {id: [x, y, w, l]}
@@ -172,8 +171,8 @@ def calc_ref_trajectory_in_T_step(node, ref_path, sp, acc_mode='accelerate'):
     length = ref_path.length
     
     # 设置舒适加速度和减速度（可调整）
-    comfort_acc = 2.0  # m/s^2
-    comfort_dec = -2.0  # m/s^2
+    comfort_acc = 3.0  # m/s^2
+    comfort_dec = -3.0  # m/s^2
     
     # 获取当前速度
     v0 = abs(node.v)
@@ -841,10 +840,10 @@ class MPCProblem:
                         
                         # Adaptive safe distance for linear constraints
                         if vehicle_type == "same_lane_static":
-                            base_safe_distance = 6.0  # Larger for static obstacles
+                            base_safe_distance = 2.5  # Larger for static obstacles
                             lateral_factor = max(0.8, (4.5 - lat_dist) / 4.5)
                         else:
-                            base_safe_distance = 4.0
+                            base_safe_distance = 2.5
                             lateral_factor = max(0.6, (4.5 - lat_dist) / 4.5)
                         
                         safe_distance = base_safe_distance * lateral_factor
