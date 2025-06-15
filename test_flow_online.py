@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""
+自动驾驶规划系统 - 在线测试版本
+
+修改说明：
+- 添加了线程锁保护，解决高频传感器数据导致的数据竞争问题
+- 实现数据快照机制，确保规划算法使用的是同一时刻的一致性数据
+- 添加数据新鲜度验证，避免使用过时数据进行规划
+- 优化了数据处理流程，提高系统稳定性和安全性
+"""
 import sys
 sys.path.append('/home/wanji/HIL/devel/lib/python3/dist-packages')
 import rospy
@@ -24,8 +33,13 @@ from planner import CACS_plan, bag_plan
 import os
 import json
 import time
+import threading  # 添加线程模块
 
 logging.basicConfig(filename='test_flow_online.log', level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# 添加数据锁保护
+data_lock = threading.Lock()
+
 global pub_ego_plan
 global pub_ego_decision
 global reference_line_received
@@ -172,31 +186,36 @@ def validate_obstacle_speed_conversion(ego_speed, ego_heading_deg, rel_vx, rel_v
     rospy.logwarn("使用了已废弃的验证函数，请使用validate_obstacle_speed_conversion_v2")
 
 def update_frame_data(topic, msg):
-    if topic == "/sensorgps":
-        frame_data["sensorgps"] = msg
-        data_status["sensorgps"] = True
-        rospy.loginfo("sensorgps received!")  # 使用普通的print替代rospy.loginfo
-        
-    elif topic == "/objectTrack/track_results":
-        frame_data["objectTrack"] = msg
-        data_status["objectTrack"] = True
-        rospy.loginfo("objectTrack received!")
-        
-    elif topic == "/actuator":
-        frame_data["actuator"] = msg
-        data_status["actuator"] = True
-        rospy.loginfo("actuator received!")
-    elif topic == "/hdroutetoglobal":
-        frame_data["hdroutetoglobal"] = msg
-        data_status["hdroutetoglobal"] = True
-        rospy.loginfo("hdroutetoglobal received!")
+    with data_lock:
+        if topic == "/sensorgps":
+            frame_data["sensorgps"] = msg
+            data_status["sensorgps"] = True
+            rospy.loginfo("sensorgps received!")  # 使用普通的print替代rospy.loginfo
+            
+        elif topic == "/objectTrack/track_results":
+            frame_data["objectTrack"] = msg
+            data_status["objectTrack"] = True
+            rospy.loginfo("objectTrack received!")
+            
+        elif topic == "/actuator":
+            frame_data["actuator"] = msg
+            data_status["actuator"] = True
+            rospy.loginfo("actuator received!")
+        elif topic == "/hdroutetoglobal":
+            frame_data["hdroutetoglobal"] = msg
+            data_status["hdroutetoglobal"] = True
+            rospy.loginfo("hdroutetoglobal received!")
         
 # 规划动作
-def cal_action(sensor_data, reference_data):
+def cal_action(sensor_data, reference_data, frame_data_snapshot=None):
     ego_plan = planningmotion()
     ego_decision = decisionbehavior()
     ego_plan.points = roadpoint()
     use_mpc = True
+    
+    # 使用快照数据而不是全局变量，确保数据一致性
+    if frame_data_snapshot is None:
+        frame_data_snapshot = frame_data  # 向后兼容
     
     # 获取主车当前状态信息
     ego_speed = 0.0  # 主车速度
@@ -213,9 +232,9 @@ def cal_action(sensor_data, reference_data):
     ego_vx_body = 0.0  # 主车横向速度为0（不侧滑）
     ego_vy_body = ego_speed  # 主车纵向速度等于车速
     
-    # 处理障碍物信息
-    if "objectTrack" in frame_data and frame_data["objectTrack"] is not None:
-        sensorobjects_msg = frame_data["objectTrack"]
+    # 处理障碍物信息（使用快照数据确保一致性）
+    if "objectTrack" in frame_data_snapshot and frame_data_snapshot["objectTrack"] is not None:
+        sensorobjects_msg = frame_data_snapshot["objectTrack"]
         
         # 初始化障碍物参数
         if hasattr(sensorobjects_msg, 'obs'):
@@ -262,13 +281,13 @@ def cal_action(sensor_data, reference_data):
                     validate_obstacle_speed_conversion_v2(ego_speed, ego_heading_deg, rel_vx_body, rel_vy_body, abs_vx_global, abs_vy_global)
                     
                     # 创建障碍物信息对象，传递全局坐标系下的绝对速度信息
-                    obstacle = ObstacleInfo(obs_id, obs_x_global, obs_y_global, abs_vx_global, abs_vy_global, width, length)
+                    obstacle = ObstacleInfo(obs_id, obs_x_global, obs_y_global, abs_vx_body, abs_vy_body, width, length)
                     
                     # 判断障碍物类型并输出调试信息
                     v_magnitude = obstacle.v
                     obstacle_type = obstacle.type
                     
-                    rospy.loginfo(f"障碍物 {obs_id}: {obstacle_type}, 位置=({obs_x_global:.1f},{obs_y_global:.1f})")
+                    rospy.logdebug(f"障碍物 {obs_id}: {obstacle_type}, 位置=({obs_x_global:.1f},{obs_y_global:.1f})")
                     rospy.loginfo(f"  车身系相对速度=({rel_vx_body:.2f},{rel_vy_body:.2f})")
                     rospy.loginfo(f"  车身系绝对速度=({abs_vx_body:.2f},{abs_vy_body:.2f})")
                     rospy.loginfo(f"  全局系绝对速度=({abs_vx_global:.2f},{abs_vy_global:.2f}), |v|={v_magnitude:.2f}")
@@ -300,38 +319,78 @@ def reset_data_status():
         data_status[key] = False
         data_status["hdroutetoglobal"] = True
 
+# 验证数据新鲜度
+def validate_data_freshness(frame_data_snapshot):
+    """验证数据是否新鲜，避免使用过时数据"""
+    try:
+        current_time = rospy.Time.now()
+        max_age = 0.5  # 最大允许数据年龄（秒）
+        
+        for key, msg in frame_data_snapshot.items():
+            if msg is None:
+                continue
+                
+            # 检查消息是否有时间戳
+            if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
+                age = (current_time - msg.header.stamp).to_sec()
+                if age > max_age:
+                    rospy.logwarn(f"{key} data is {age:.2f}s old, considered stale")
+                    return False
+            elif hasattr(msg, 'timestamp'):
+                # 某些消息可能直接有timestamp字段
+                age = current_time.to_sec() - msg.timestamp
+                if age > max_age:
+                    rospy.logwarn(f"{key} data is {age:.2f}s old, considered stale")
+                    return False
+        
+        return True
+    except Exception as e:
+        rospy.logwarn(f"Error validating data freshness: {e}")
+        return True  # 如果验证失败，仍然允许处理
+
 # 检查数据是否齐全，且仅在数据齐全时处理
 def check_and_process_data():
+    # 创建数据快照，避免在处理过程中被修改
+    frame_data_snapshot = None
+    
+    with data_lock:
+        if all(data_status.values()):
+            rospy.loginfo("All data received, creating data snapshot...")
+            # 创建数据快照，确保数据一致性
+            frame_data_snapshot = copy.deepcopy(frame_data)
+            rospy.logdebug(f"Data snapshot created with keys: {list(frame_data_snapshot.keys())}")
+            # 立即重置状态，允许新数据进入
+            reset_data_status()
+    
+    # 在锁外进行计算，使用快照数据
+    if frame_data_snapshot is not None:
+        rospy.loginfo("Processing planning with snapshot data...")
+        
+        # 验证数据新鲜度（可选）
+        if validate_data_freshness(frame_data_snapshot):
+            # 经纬度转为笛卡尔坐标
+            lon_lat_converter_state = lon_lat_to_xy([frame_data_snapshot["sensorgps"]])
+            state_dict = lon_lat_converter_state.get_pos()
 
-    if all(data_status.values()):
-        rospy.loginfo("All data received, processing planning...")     
-        # 经纬度转为笛卡尔坐标
-        lon_lat_converter_state = lon_lat_to_xy([frame_data["sensorgps"]])
-        state_dict = lon_lat_converter_state.get_pos()
+            ref_dict = {
+                "hdroutetoglobal": frame_data_snapshot["hdroutetoglobal"]
+            }
 
-        # lon_lat_converter_ref = lon_lat_to_xy_map([frame_data["hdroutetoglobal"]])
-        # ref_dict = lon_lat_converter_ref.get_pos()
-        # state_dict = None
-        ref_dict = {
-            "hdroutetoglobal": frame_data["hdroutetoglobal"]
-        }
+            start_time = time.time()
 
-        start_time = time.time()
+            # 进行规划（使用快照数据，确保数据一致性）
+            ego_plan, ego_decision = cal_action(state_dict, ref_dict, frame_data_snapshot)
 
-        # 进行规划
-        ego_plan, ego_decision = cal_action(state_dict, ref_dict)
+            end_time = time.time()
+            execution_time = end_time - start_time
+            rospy.loginfo(f"Planning and decision execution time: {execution_time:.2f}s")
 
-        end_time = time.time()
-        execution_time = end_time - start_time
-        rospy.loginfo(f"Planning and decision execution time: {execution_time:.2f}s")
-
-        # 发布规划结果
-        pub_ego_plan.publish(ego_plan)
-        pub_ego_decision.publish(ego_decision)
-        rospy.loginfo("Planning and decision published!")
-
-        # 重置数据状态标志
-        reset_data_status()
+            # 发布规划结果
+            pub_ego_plan.publish(ego_plan)
+            pub_ego_decision.publish(ego_decision)
+            rospy.loginfo("Planning and decision published!")
+        else:
+            rospy.logwarn("Data snapshot is stale, skipping planning cycle")
 
 # 回调函数
 def callback_sensorgps(data):
@@ -352,9 +411,7 @@ def callback_hdroutetoglobal(data):
         # 第一次收到参考线数据时初始化
         frame_data["hdroutetoglobal"] = data
         data_status["hdroutetoglobal"] = True
-        reference_data = {"hdroutetoglobal": data}
-        from planner import init_reference_path
-        init_reference_path(reference_data)
+
         check_and_process_data()
     else:
         rospy.loginfo("hdroutetoglobal already received!")  
@@ -366,7 +423,7 @@ def offline_test():
     # 打开bag文件
     # file_path = '/home/admin/Downloads/20250211-bag/2025-02-11-15-31-30.bag'2025-06-11-17-19-41.bag
     # file_path = '/home/admin/Downloads/2025-06-11-17-23-05.bag' 
-    file_path = '/home/admin/Downloads/2025-06-11-17-19-41.bag' 
+    file_path = '/home/admin/Downloads/2025-06-14-11-03-41/2025-06-14-11-03-41.bag' 
     bag = rosbag.Bag(file_path, 'r')
     
     # 按时间戳组织数据
@@ -472,7 +529,6 @@ def main():
         rospy.Subscriber("/sensorgps", sensorgps, callback_sensorgps, queue_size=3)
         
         rospy.loginfo("ROS node initialized and waiting for data...")
-        rate = rospy.Rate(100) # 100Hz  
         rospy.spin() # keep the node running
 
 if __name__ == "__main__":

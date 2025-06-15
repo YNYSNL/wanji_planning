@@ -389,7 +389,7 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
     
     # 6. 创建基础点属性
     base_point = roadpoint()
-    base_point.speed = 15
+    base_point.speed = 20
     base_point.roadtype = 2
     base_point.turnlight = 0
     base_point.a = 2
