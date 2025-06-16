@@ -729,7 +729,7 @@ class MPCProblem:
         """Add linearized adaptive obstacle constraints: follow dynamic obstacles, avoid static obstacles"""
         treat_as_static = P.treat_obstacles_as_static
         
-        for t in range(min(P.T, P.obstacle_horizon)):
+        for t in range(max(P.T, P.obstacle_horizon)):
             robot_pos = self.z_bar[:2, t]
             robot_yaw = self.z_bar[3, t]  # Vehicle heading angle
             
@@ -742,7 +742,6 @@ class MPCProblem:
                 # Determine if obstacle is dynamic or static
                 # Use the obstacle's built-in dynamic/static classification
                 is_dynamic = getattr(obstacle, 'is_dynamic', False)
-                v_magnitude = getattr(obstacle, 'v', 0.0)
                 
                 # Calculate predicted obstacle position at time t
                 if treat_as_static or not is_dynamic:
@@ -829,7 +828,7 @@ class MPCProblem:
                         longitudinal_separation = forward_vec_ca.T @ relative_pos_ca
                         
                         # Lighter following constraint for linear approximation
-                        safe_following_distance = 2.0  # Reduced for linear constraints
+                        safe_following_distance = 4.0  # Reduced for linear constraints
                         self.opti.subject_to(-longitudinal_separation >= safe_following_distance)
                         
                         # logger.info(f"线性跟驰约束 t={t}, obs_id={obs_id}, long_dist={long_dist:.2f}m")

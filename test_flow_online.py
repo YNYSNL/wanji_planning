@@ -142,7 +142,7 @@ class ObstacleInfo:
         else:
             self.type = "static"
 
-def validate_obstacle_speed_conversion_v2(ego_speed, ego_heading_deg, rel_vx_body, rel_vy_body, abs_vx_global, abs_vy_global):
+def validate_obstacle_speed_conversion(ego_speed, ego_heading_deg, rel_vx_body, rel_vy_body, abs_vx_global, abs_vy_global):
     """
     验证障碍物速度转换是否正确（修正版）
     
@@ -176,12 +176,6 @@ def validate_obstacle_speed_conversion_v2(ego_speed, ego_heading_deg, rel_vx_bod
         rospy.logwarn(f"全局系转换后: ({abs_vx_global:.2f}, {abs_vy_global:.2f})")
         rospy.logwarn(f"全局系期望值: ({expected_abs_vx_global:.2f}, {expected_abs_vy_global:.2f})")
 
-# 保留旧的验证函数以备兼容
-def validate_obstacle_speed_conversion(ego_speed, ego_heading_deg, rel_vx, rel_vy, abs_vx, abs_vy):
-    """
-    验证障碍物速度转换是否正确（旧版本，已废弃）
-    """
-    rospy.logwarn("使用了已废弃的验证函数，请使用validate_obstacle_speed_conversion_v2")
 
 def update_frame_data(topic, msg):
     with data_lock:
@@ -276,7 +270,7 @@ def cal_action(sensor_data, reference_data, frame_data_snapshot=None):
                     abs_vy_global = abs_vx_body * np.sin(ego_heading + np.pi/2) + abs_vy_body * np.cos(ego_heading + np.pi/2)
                     
                     # 验证速度转换是否正确
-                    validate_obstacle_speed_conversion_v2(ego_speed, ego_heading_deg, rel_vx_body, rel_vy_body, abs_vx_global, abs_vy_global)
+                    validate_obstacle_speed_conversion(ego_speed, ego_heading_deg, rel_vx_body, rel_vy_body, abs_vx_global, abs_vy_global)
                     
                     # 创建障碍物信息对象，传递全局坐标系下的绝对速度信息
                     obstacle = ObstacleInfo(obs_id, obs_x_global, obs_y_global, abs_vx_body, abs_vy_body, width, length)
@@ -285,7 +279,8 @@ def cal_action(sensor_data, reference_data, frame_data_snapshot=None):
                     v_magnitude = obstacle.v
                     obstacle_type = obstacle.type
                     
-                    rospy.logdebug(f"障碍物 {obs_id}: {obstacle_type}, 位置=({obs_x_global:.1f},{obs_y_global:.1f})")
+                    rospy.loginfo(f"障碍物 {obs_id}: {obstacle_type}, 位置=({obs_x_global:.1f},{obs_y_global:.1f})")
+                    
                     rospy.loginfo(f"  车身系相对速度=({rel_vx_body:.2f},{rel_vy_body:.2f})")
                     rospy.loginfo(f"  车身系绝对速度=({abs_vx_body:.2f},{abs_vy_body:.2f})")
                     rospy.loginfo(f"  全局系绝对速度=({abs_vx_global:.2f},{abs_vy_global:.2f}), |v|={v_magnitude:.2f}")
@@ -480,7 +475,7 @@ def offline_test():
 
         print(data_status.values())       
         # 检查数据是否完整并进行规划
-        if i < 100 or i > 610:
+        if i < 280 or i > 610:
             continue
 
         start_time = time.time()
@@ -568,7 +563,7 @@ def main():
         # 初始化ROS节点
         rospy.init_node("ros_topic_processor", anonymous=True)
         
-        # 🔥 系统预热（在订阅话题之前进行）
+        # 系统预热（在订阅话题之前进行）
         warm_up_planning_system()
         
         pub_ego_plan = rospy.Publisher("/planningmotion", planningmotion, queue_size=3)

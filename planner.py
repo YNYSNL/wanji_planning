@@ -287,15 +287,6 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         # 使用MPC生成局部坐标系下的轨迹
         start_time2 = time.time()
         x_local, y_local, yaw_local, v_local = generate_mpc_trajectory(ego_state, local_ref_path)
-        # print(x_local[0],y_local[0])
-        # plt.plot(local_ref_path.cx, local_ref_path.cy, label='Trajectory Points',color='blue')
-        # plt.plot(x_local, y_local, label='Trajectory Points',color='red')
-
-        # plt.scatter(ego_state.x, ego_state.y, marker='x', label='Vehicle Position',s=80,color='red')
-
-        # plt.draw()
-        # plt.pause(1)
-        # plt.close()
 
         end_time2 = time.time()
         mpc_generation_time = end_time2 - start_time2
@@ -309,8 +300,6 @@ def CACS_plan(state_data, reference_data, ego_plan, ego_decision, use_mpc=False)
         
         rospy.loginfo(f"generate_mpc_trajectory time: {mpc_generation_time} seconds")
         
-        # 每10步或达到100步时绘制时间变化曲线
-        print('step_counter',step_counter)
         # if step_counter == 150:
         #     plot_mpc_time_curve()
         
@@ -597,12 +586,8 @@ def generate_mpc_trajectory(ego_state, local_ref_path):
     print('initial_state',initial_state)
     
     # 使用MPC控制器生成轨迹
-    # try:
-    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=True, acc_mode='accelerate',show_plot=False,use_linear_constraints=True)
-    # if x_opt is None or y_opt is None or yaw_opt is None or v_opt is None:
-    #     rospy.logwarn("MPC optimization failed, falling back to simple trajectory")
-    #     # 如果MPC优化失败，使用简单轨迹
-    #     return fallback_trajectory(ego_state)
+
+    target_ind, x_opt, y_opt, yaw_opt, v_opt = mpc_controller.update(local_ref_path, initial_state, consider_obstacles=True, acc_mode='accelerate',show_plot=True,use_linear_constraints=True)
     
     # 将MPC预测轨迹转换为数组格式
     x_local = np.array(x_opt)
@@ -611,24 +596,7 @@ def generate_mpc_trajectory(ego_state, local_ref_path):
     v_local = np.array(v_opt)
     
     return x_local, y_local, yaw_local, v_local
-        
-    # except Exception as e:
-    #     rospy.logerr(f"Error in MPC trajectory generation: {e}")
-    #     return fallback_trajectory(ego_state)
 
-def fallback_trajectory(ego_state):
-    """
-    fallback trajectory generation method when MPC fails
-    
-    return local coordinate trajectory
-    """
-    time_steps = 50
-    a = 2  # 加速度
-    delta = 0  # 转向角
-    
-    x_local, y_local, yaw_local, v_local = generate_trajectory(ego_state, time_steps, a, delta)
-    
-    return x_local, y_local, yaw_local, v_local
 
 def generate_trajectory(ego_state, time_steps=50, a=2, delta=0):
     """generate coarse trajectory based on vehicle coordinate system"""
